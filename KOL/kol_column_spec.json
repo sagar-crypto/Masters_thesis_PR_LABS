@@ -1,0 +1,20 @@
+{
+    "time_col": ["ResultsRepl", "Zeitpunkt in s"],
+  
+    "signal_groups": {
+      "Bus1Line_1_2_a": {
+        "cubicle_key": "Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt",
+  
+        "keep_cols": [
+          ["Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt", "Sekundärspannung L1 in V"],
+          ["Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt", "Sekundärspannung L2 in V"],
+          ["Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt", "Sekundärspannung L3 in V"],
+          ["Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt", "Sekundärstrom L1 in A"],
+          ["Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt", "Sekundärstrom L2 in A"],
+          ["Cub_1\\Bus1Line_1_2_a_ai_exp_ct_vt", "Sekundärstrom L3 in A"]
+        ],
+  
+        "stack_order": ["Va", "Vb", "Vc", "Ia", "Ib", "Ic"]
+      }
+    }
+}
