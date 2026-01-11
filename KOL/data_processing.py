@@ -124,6 +124,7 @@ class EventIndex:
     sc_type: np.ndarray
     phase_select: np.ndarray
     valid: np.ndarray
+    fault_r: np.ndarray
 
 
 def build_event_index_from_npy(
@@ -138,7 +139,7 @@ def build_event_index_from_npy(
 
     rep_ids, s_idx, e_idx, y, fs_est = [], [], [], [], []
     r1, x1, r0, x0, L_km = [], [], [], [], []
-    sc_type, phase_select, valid = [], [], []
+    sc_type, phase_select,fault_r, valid = [], [], [], []
 
     for _, row in labels.iterrows():
         rid = int(row["rep_id"])
@@ -179,6 +180,7 @@ def build_event_index_from_npy(
 
         sc_type.append(str(row["sc_type"]))
         phase_select.append(str(row["phase_select"]))
+        fault_r.append(float(row["fault_resistance"]))
         valid.append(ok)
 
     return EventIndex(
@@ -194,6 +196,7 @@ def build_event_index_from_npy(
         L_km=np.asarray(L_km, dtype=np.float32),
         sc_type=np.asarray(sc_type, dtype=object),
         phase_select=np.asarray(phase_select, dtype=object),
+        fault_r=np.asarray(fault_r, dtype=np.float32),
         valid=np.asarray(valid, dtype=bool),
     )
 
@@ -274,6 +277,7 @@ class FaultWindowNpyDataset(Dataset):
         self.L_km = event_index.L_km[keep]
         self.sc_type = event_index.sc_type[keep]
         self.phase_select = event_index.phase_select[keep]
+        self.fault_r = event_index.fault_r[keep]
 
     def __len__(self) -> int:
         return int(len(self.y))
@@ -387,10 +391,11 @@ class FaultWindowNpyDataset(Dataset):
         arr = self.cache.get(rid)
         win = np.asarray(arr[s:e, :], dtype=np.float32)
 
-        X_raw = win[:, self.colspec.keep_indices].astype(np.float32)
-        X_win = self._norm_window(X_raw.copy())
+        X_raw = win[:, self.colspec.keep_indices].astype(np.float32)   # (T,C)
+        X_win = self._norm_window(X_raw.copy())                        # (T,C) normalized for NN
 
         y = np.float32(self.y[idx])
+
         classic_pct, ko_feats = self._compute_ko(
             X_raw=X_raw,
             fs=float(self.fs_est[idx]),
@@ -403,40 +408,69 @@ class FaultWindowNpyDataset(Dataset):
             phase_select=str(self.phase_select[idx]),
         )
 
+        # --- NEW: build context vector (float32) ---
+        # context = [classic_pct, ko_feats(6), r1,x1,r0,x0,L_km,(fault_r)]
+        ctx_parts = [
+            np.array([classic_pct], dtype=np.float32),         # (1,)
+            ko_feats.astype(np.float32),                       # (6,)
+            np.array([
+                float(self.r1[idx]), float(self.x1[idx]),
+                float(self.r0[idx]), float(self.x0[idx]),
+                float(self.L_km[idx]),
+            ], dtype=np.float32),                               # (5,)
+        ]
+
+        # Optional: include fault resistance if you added it to EventIndex/Dataset
+        if hasattr(self, "fault_r"):
+            ctx_parts.append(np.array([float(self.fault_r[idx])], dtype=np.float32))  # (1,)
+
+        context = np.concatenate(ctx_parts, axis=0).astype(np.float32)  # (12) or (13)
+
         if self.return_ko_feats:
             return (
-                torch.from_numpy(X_win),
-                torch.tensor(y, dtype=torch.float32),
-                torch.tensor(classic_pct, dtype=torch.float32),
-                torch.from_numpy(ko_feats),
+                torch.from_numpy(X_win),                        # (T,C)
+                torch.tensor(y, dtype=torch.float32),           # ()
+                torch.tensor(classic_pct, dtype=torch.float32), # ()
+                torch.from_numpy(ko_feats),                     # (6,)
+                torch.from_numpy(context),                      # (12) or (13,)
             )
+
         return (
             torch.from_numpy(X_win),
             torch.tensor(y, dtype=torch.float32),
             torch.tensor(classic_pct, dtype=torch.float32),
+            torch.from_numpy(context),
         )
+
 
 
 # -------------------------
 # Train stats (optional)
 # -------------------------
-def compute_train_stats(dataset, indices: np.ndarray, max_items: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
+def compute_train_stats(
+    dataset,
+    indices: np.ndarray,
+    max_items: Optional[int] = None
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Optional helper for normalize='train_global'.
-    Call with dataset configured as normalize='none'.
+    Compute per-channel mean/std over a subset of windows.
+
+    IMPORTANT:
+    - dataset must be created with normalize="none"
+    - indices must refer to the dataset AFTER filtering (only_valid)
     """
+    if indices is None or len(indices) == 0:
+        raise ValueError("compute_train_stats: received empty indices.")
+
     if max_items is not None:
         indices = indices[:max_items]
-    if indices is None or len(indices) == 0:
-        raise ValueError("compute_train_stats: empty indices.")
 
     sums = None
     sqs = None
     count = 0
 
     for i in indices:
-        item = dataset[int(i)]
-        X = item[0]
+        X = dataset[int(i)][0]   # always X_win
         Xn = X.detach().cpu().numpy() if isinstance(X, torch.Tensor) else np.asarray(X)
 
         if sums is None:
@@ -448,7 +482,14 @@ def compute_train_stats(dataset, indices: np.ndarray, max_items: Optional[int] =
         sqs += (Xn ** 2).sum(axis=0)
         count += Xn.shape[0]
 
-    mu = sums / max(1, count)
-    var = sqs / max(1, count) - mu ** 2
+    if sums is None or sqs is None or count == 0:
+        raise RuntimeError(
+            "compute_train_stats: no samples accumulated. "
+            "Likely causes: empty indices, all events filtered out, or max_items=0."
+        )
+
+    mu = sums / count
+    var = sqs / count - mu ** 2
     sigma = np.sqrt(np.maximum(var, 1e-12))
     return mu.astype(np.float32), sigma.astype(np.float32)
+

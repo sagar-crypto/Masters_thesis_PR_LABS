@@ -66,16 +66,18 @@ def set_seed(seed: int):
 def evaluate(model, loader, device):
     model.eval()
     preds, trues = [], []
-    for xb, yb, cb, _ko in loader:
+    for xb, yb, cb, _ko, ctx in loader:
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
         cb = cb.to(device, non_blocking=True)
+        ctx = ctx.to(device, non_blocking=True)
 
-        delta = model(xb, cb)
+        delta = model(xb, ctx)      # <-- changed (was model(xb, cb))
         y_hat = cb + delta
 
         preds.append(y_hat.detach().cpu().numpy())
         trues.append(yb.detach().cpu().numpy())
+
     preds = np.concatenate(preds, axis=0)
     trues = np.concatenate(trues, axis=0)
     return float(mean_absolute_error(trues, preds))
@@ -137,8 +139,7 @@ def train_one_seed(seed: int = 42) -> dict:
         only_valid=False,           # we index explicitly by ids
         normalize="none",           # IMPORTANT for stats
         train_stats=None,
-        return_ko_feats=True,
-        ko_use_phase="a",
+        return_ko_feats=True
     )
 
     mu, sigma = compute_train_stats(ds_raw, indices=tr_ids, max_items=None)
@@ -156,9 +157,14 @@ def train_one_seed(seed: int = 42) -> dict:
         only_valid=False,
         normalize="train_global",
         train_stats=(mu, sigma),
-        return_ko_feats=True,
-        ko_use_phase="a",
+        return_ko_feats=True
     )
+
+    sample = ds[int(tr_ids[0])]
+    # sample is (X, y, classic, ko, ctx) OR (X, y, classic, ctx) depending on your dataset
+    ctx = sample[-1]
+    context_dim = int(ctx.numel())  # ctx is (D,)
+    print("context_dim =", context_dim)
 
     train_ds = Subset(ds, tr_ids.tolist())
     test_ds  = Subset(ds, te_ids.tolist())
@@ -178,9 +184,10 @@ def train_one_seed(seed: int = 42) -> dict:
     # grab classic_pct quickly from test set
     y_true = []
     y_base = []
-    for xb, yb, cb, _ko in test_loader:
+    for xb, yb, cb, _ko, _ctx in test_loader:
         y_true.append(yb.numpy())
         y_base.append(cb.numpy())
+
     y_true = np.concatenate(y_true)
     y_base = np.concatenate(y_base)
     mae_classic = float(mean_absolute_error(y_true, y_base))
@@ -191,7 +198,7 @@ def train_one_seed(seed: int = 42) -> dict:
     # Model
     # -------------------------
     n_channels = len(colspec.keep_indices)
-    model = WaveDeltaCNN(n_channels=n_channels, dropout=DROPOUT).to(device)
+    model = WaveDeltaCNN(n_channels=n_channels, context_dim=context_dim, dropout=DROPOUT).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     loss_fn = nn.SmoothL1Loss(beta=1.0) if USE_SMOOTHL1 else nn.L1Loss()
@@ -205,13 +212,14 @@ def train_one_seed(seed: int = 42) -> dict:
     # -------------------------
     for epoch in range(1, EPOCHS + 1):
         model.train()
-        for xb, yb, cb, _ko in train_loader:
+        for xb, yb, cb, _ko, ctx in train_loader:
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             cb = cb.to(device, non_blocking=True)
+            ctx = ctx.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            delta = model(xb, cb)
+            delta = model(xb, ctx)
             y_hat = cb + delta
             loss = loss_fn(y_hat, yb)
             loss.backward()

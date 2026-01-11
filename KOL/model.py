@@ -7,31 +7,36 @@ class WaveDeltaCNN(nn.Module):
     Predicts delta (%) to correct the classical estimate:
         y_hat = classic_pct + delta
     """
-    def __init__(self, n_channels: int, dropout: float = 0.2):
+    def __init__(self, n_channels: int, context_dim: int, dropout: float = 0.2):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv1d(n_channels, 16, kernel_size=9, padding=4),
+        self.cnn = nn.Sequential(
+            nn.Conv1d(n_channels, 32, kernel_size=9, padding=4),
             nn.ReLU(),
-            nn.MaxPool1d(2),  # T -> T/2
-
-            nn.Conv1d(16, 32, kernel_size=9, padding=4),
-            nn.ReLU(),
-            nn.MaxPool1d(2),  # T/2 -> T/4
+            nn.MaxPool1d(2),
 
             nn.Conv1d(32, 64, kernel_size=9, padding=4),
             nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),  # -> (B,64,1)
-        )
-        self.head = nn.Sequential(
-            nn.Linear(64 + 1, 32),  # + classic_pct conditioning
+            nn.MaxPool1d(2),
+
+            nn.Conv1d(64, 128, kernel_size=9, padding=4),
             nn.ReLU(),
-            nn.Dropout(p=dropout),
-            nn.Linear(32, 1),
+            nn.AdaptiveAvgPool1d(1),  # -> (B,128,1)
         )
 
-    def forward(self, x, classic_pct):
-        # x: (B,T,C) -> (B,C,T)
-        x = x.transpose(1, 2)
-        z = self.net(x).squeeze(-1)                      # (B,64)
-        z = torch.cat([z, classic_pct.unsqueeze(1)], 1)  # (B,65)
-        return self.head(z).squeeze(-1)                  # (B,)
+        self.head = nn.Sequential(
+            nn.Linear(128 + context_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x_win: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        # x_win: (B,T,C) -> Conv1d expects (B,C,T)
+        x = x_win.transpose(1, 2)              # (B,C,T)
+        z = self.cnn(x).squeeze(-1)            # (B,128)
+        h = torch.cat([z, context], dim=1)     # (B,128+context_dim)
+        delta = self.head(h).squeeze(-1)       # (B,)
+        return delta                # (B,)
