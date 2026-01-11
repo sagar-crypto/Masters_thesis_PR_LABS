@@ -254,11 +254,6 @@ def main():
     print(f"Classical MAE: {res['mae_classic']:.2f} %")
     print(f"KOL MAE (best): {res['best_mae_kol']:.2f} % @ epoch {res['best_epoch']}")
 
-    # Optional: multi-seed robustness
-    # seeds = [0, 1, 2, 3, 4]
-    # results = [train_one_seed(s) for s in seeds]
-    # kol = np.array([r["best_mae_kol"] for r in results], dtype=np.float32)
-    # print(f"\nKOL over seeds: mean={kol.mean():.2f} std={kol.std():.2f} | vals={kol}")
 
 
 if __name__ == "__main__":
