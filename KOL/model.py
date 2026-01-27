@@ -1,11 +1,10 @@
-# models.py
 import torch
 import torch.nn as nn
 
 class WaveDeltaCNN(nn.Module):
     """
-    Predicts delta (%) to correct the classical estimate:
-        y_hat = classic_pct + delta
+    Predicts delta in normalized space (0–1) to correct the classical estimate:
+        y_hat_n = cb_n + delta_n
     """
     def __init__(self, n_channels: int, context_dim: int, dropout: float = 0.2):
         super().__init__()
@@ -39,4 +38,5 @@ class WaveDeltaCNN(nn.Module):
         z = self.cnn(x).squeeze(-1)            # (B,128)
         h = torch.cat([z, context], dim=1)     # (B,128+context_dim)
         delta = self.head(h).squeeze(-1)       # (B,)
-        return delta                # (B,)
+        return delta
+

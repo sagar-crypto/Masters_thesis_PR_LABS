@@ -1,26 +1,29 @@
 # train.py
 from __future__ import annotations
-import os
 import sys
 from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 import numpy as np
+import torch.nn.functional as F
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error
+from torch.utils.data import WeightedRandomSampler
+
 
 from config import LABELS_CSV, CACHE_FILE_PATH, COLUMN_SPEC_JSON
-from data_processing import (
+from .data_processing import (
     load_column_spec,
     build_event_index_from_npy,
     FaultWindowNpyDataset,
     compute_train_stats,
 )
-from model import WaveDeltaCNN
+from .analyze_errors import analyze_plateau, fit_classic_calibration, eval_classic_baselines, eval_flip_baseline, eval_best_of_two_baseline
+from .model import WaveDeltaCNN
 
 
 # -------------------------
@@ -42,8 +45,9 @@ WEIGHT_DECAY = 1e-4
 
 USE_SMOOTHL1 = True
 DROPOUT = 0.2
+SCALE = 100.0
 
-NUM_WORKERS = 4
+NUM_WORKERS = 6
 PIN_MEMORY = True
 
 SUBSAMPLE_FRAC = 0.10      # 10% of valid events
@@ -51,6 +55,9 @@ SUBSAMPLE_MAX  = 500       # hard cap (None to disable)
 SMOKE_ONLY     = False      # set False to train on full data
 
 EVAL_EPOCHS = {1, 5, 10, 20, 30, 50}
+EDGE_LO = 20.0
+EDGE_HI = 80.0
+EDGE_MULT = 2.0
 
 
 def set_seed(seed: int):
@@ -66,21 +73,29 @@ def set_seed(seed: int):
 def evaluate(model, loader, device):
     model.eval()
     preds, trues = [], []
-    for xb, yb, cb, _ko, ctx in loader:
-        xb = xb.to(device, non_blocking=True)
-        yb = yb.to(device, non_blocking=True)
-        cb = cb.to(device, non_blocking=True)
-        ctx = ctx.to(device, non_blocking=True)
+    with torch.no_grad():
+        for xb, yb, cb, _ko, ctx in loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)   # y in %
+            cb = cb.to(device, non_blocking=True)   # classic in %
+            ctx = ctx.to(device, non_blocking=True)
 
-        delta = model(xb, ctx)      # <-- changed (was model(xb, cb))
-        y_hat = cb + delta
+            # normalize to 0–1
+            yb_n = yb / SCALE
+            cb_n = cb / SCALE
 
-        preds.append(y_hat.detach().cpu().numpy())
-        trues.append(yb.detach().cpu().numpy())
+            delta_n = model(xb, ctx)              # (B,)
+            y_hat_n = cb_n + delta_n              # (B,)
+            y_hat_n = torch.clamp(y_hat_n, 0.0, 1.0)
+
+            preds.append(y_hat_n.detach().cpu().numpy())
+            trues.append(yb_n.detach().cpu().numpy())
 
     preds = np.concatenate(preds, axis=0)
     trues = np.concatenate(trues, axis=0)
-    return float(mean_absolute_error(trues, preds))
+
+    mae_frac = mean_absolute_error(trues, preds)
+    return float(mae_frac * 100.0)
 
 
 def train_one_seed(seed: int = 42) -> dict:
@@ -169,13 +184,31 @@ def train_one_seed(seed: int = 42) -> dict:
     train_ds = Subset(ds, tr_ids.tolist())
     test_ds  = Subset(ds, te_ids.tolist())
 
+    weights = np.ones(len(tr_ids), dtype=np.float32)
+
+    # IMPORTANT: use the base dataset `ds` with the original indices in tr_ids
+    # so weight[i] corresponds to the i-th element of train_ds (Subset order).
+    for i, event_id in enumerate(tr_ids):
+        # ds[event_id] -> (X, y, classic, ko, ctx)
+        sample = ds[int(event_id)]
+        y_val = float(sample[1])  # y in %
+        if y_val >= EDGE_HI:
+            weights[i] *= EDGE_MULT
+
+    sampler = WeightedRandomSampler(
+        weights=weights.tolist(),
+        num_samples=len(weights),   # one "epoch" = same number of samples as before
+        replacement=True
+    )
+
     train_loader = DataLoader(
-        train_ds, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY, drop_last=False
+        train_ds, batch_size=BATCH_SIZE, sampler=sampler, shuffle=False,
+        num_workers=NUM_WORKERS, persistent_workers=True, prefetch_factor=4,
+        pin_memory=PIN_MEMORY, drop_last=False
     )
     test_loader = DataLoader(
         test_ds, batch_size=128, shuffle=False,
-        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY, drop_last=False
+        num_workers=NUM_WORKERS, persistent_workers=True, prefetch_factor=4, pin_memory=PIN_MEMORY, drop_last=False
     )
 
     # -------------------------
@@ -201,7 +234,7 @@ def train_one_seed(seed: int = 42) -> dict:
     model = WaveDeltaCNN(n_channels=n_channels, context_dim=context_dim, dropout=DROPOUT).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    loss_fn = nn.SmoothL1Loss(beta=1.0) if USE_SMOOTHL1 else nn.L1Loss()
+    loss_fn = nn.SmoothL1Loss(beta=0.05) if USE_SMOOTHL1 else nn.L1Loss()
 
     best_mae = float("inf")
     best_epoch = None
@@ -219,9 +252,14 @@ def train_one_seed(seed: int = 42) -> dict:
             ctx = ctx.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            delta = model(xb, ctx)
-            y_hat = cb + delta
-            loss = loss_fn(y_hat, yb)
+            delta = model(xb, ctx)             # (B,)
+            yb_n = yb / SCALE                  # (B,)
+            cb_n = cb / SCALE                  # (B,)
+
+            y_hat_n = cb_n + delta
+            y_hat_n = torch.clamp(y_hat_n, 0.0, 1.0)
+
+            loss = loss_fn(y_hat_n, yb_n)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -237,6 +275,15 @@ def train_one_seed(seed: int = 42) -> dict:
     # restore best
     if best_state is not None:
         model.load_state_dict(best_state)
+        a, b = fit_classic_calibration(train_loader, device)
+        print(f"[Classic calibration] a={a:.4f}, b={b:.4f}")
+
+        # 2) Evaluate raw vs calibrated classical baseline
+        eval_classic_baselines(test_loader, a, b)
+
+        analyze_plateau(model, test_loader, device, ctx_fault_type_idx=None)
+        eval_flip_baseline(test_loader)
+        eval_best_of_two_baseline(test_loader)
 
     return {
         "seed": seed,
