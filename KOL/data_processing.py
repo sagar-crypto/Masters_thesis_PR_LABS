@@ -22,6 +22,55 @@ def estimate_fs(t: np.ndarray) -> float:
     return 1.0 / float(np.median(dt))
 
 
+def resample_window_to_fs(
+    X_all: np.ndarray,
+    t: np.ndarray,
+    t_start: float,
+    t_end: float,
+    fs_target: float,
+) -> np.ndarray:
+    """
+    Resample multichannel signal X(t) onto a uniform grid [t_start, t_end)
+    at fs_target Hz. Returns shape (T_target, C) float32.
+
+    - Uses linear interpolation (np.interp) channel-wise.
+    - End is exclusive so length is exactly round((t_end - t_start) * fs_target).
+    """
+    if not (np.isfinite(t_start) and np.isfinite(t_end) and np.isfinite(fs_target)):
+        raise ValueError("Non-finite t_start/t_end/fs_target.")
+    if t_end <= t_start:
+        raise ValueError("t_end must be > t_start.")
+    if fs_target <= 0:
+        raise ValueError("fs_target must be > 0.")
+
+    # target sample count (constant for all replicas)
+    T_target = int(round((t_end - t_start) * fs_target))
+    if T_target <= 1:
+        raise ValueError("Target window too short after resampling.")
+
+    t_new = t_start + (np.arange(T_target, dtype=np.float64) / fs_target)
+
+    # ensure monotonic t for interpolation
+    order = np.argsort(t)
+    t_sorted = t[order]
+    X_sorted = X_all[order]
+
+    # np.interp needs increasing x; also handle duplicates by slight epsilon fix
+    # (rare, but can happen in exported simulations)
+    # We'll compress identical timestamps by keeping the first occurrence.
+    _, uniq_idx = np.unique(t_sorted, return_index=True)
+    t_sorted = t_sorted[uniq_idx]
+    X_sorted = X_sorted[uniq_idx]
+
+    C = X_sorted.shape[1]
+    Y = np.empty((T_target, C), dtype=np.float32)
+    for c in range(C):
+        Y[:, c] = np.interp(t_new, t_sorted, X_sorted[:, c]).astype(np.float32)
+
+    return Y
+
+
+
 def dft_phasor_1cycle(x: np.ndarray) -> complex:
     N = len(x)
     n = np.arange(N, dtype=np.float64)
@@ -112,8 +161,9 @@ def load_column_spec(json_path: str, group_name: str) -> ColumnSpec:
 @dataclass
 class EventIndex:
     rep_ids: np.ndarray
-    start_idx: np.ndarray
-    end_idx: np.ndarray
+    t_fault: np.ndarray
+    t_start: np.ndarray
+    t_end: np.ndarray
     y: np.ndarray
     fs_est: np.ndarray
     r1: np.ndarray
@@ -137,9 +187,14 @@ def build_event_index_from_npy(
 ) -> EventIndex:
     labels = pd.read_csv(labels_csv, sep=";").copy().sort_values("rep_id")
 
-    rep_ids, s_idx, e_idx, y, fs_est = [], [], [], [], []
+    rep_ids = []
+    t_faults, t_starts, t_ends = [], [], []
+    y, fs_est = [], []
     r1, x1, r0, x0, L_km = [], [], [], [], []
-    sc_type, phase_select,fault_r, valid = [], [], [], []
+    sc_type, phase_select, fault_r, valid = [], [], [], []
+
+    pre_s = pre_ms / 1000.0
+    post_s = post_ms / 1000.0
 
     for _, row in labels.iterrows():
         rid = int(row["rep_id"])
@@ -150,25 +205,26 @@ def build_event_index_from_npy(
         arr = np.load(path, mmap_mode="r")
         t = np.asarray(arr[:, time_col_index], dtype=np.float64)
 
+        # Estimate fs only for logging/debugging; do NOT use it to size windows
         try:
             fs = estimate_fs(t)
         except Exception:
             continue
 
         t_fault = float(row["t_evnt_start"])
-        f_idx = int(np.argmin(np.abs(t - t_fault)))
+        t_start = t_fault - pre_s
+        t_end = t_fault + post_s
 
-        pre_samp = int(round((pre_ms / 1000.0) * fs))
-        post_samp = int(round((post_ms / 1000.0) * fs))
-
-        s = f_idx - pre_samp
-        e = f_idx + post_samp
-
-        ok = (s >= 0) and (e <= len(t)) and (e > s)
+        # validity check purely on time coverage
+        t0 = float(t[0])
+        tN = float(t[-1])
+        ok = (t_start >= t0) and (t_end <= tN) and (t_end > t_start)
 
         rep_ids.append(rid)
-        s_idx.append(s)
-        e_idx.append(e)
+        t_faults.append(t_fault)
+        t_starts.append(t_start)
+        t_ends.append(t_end)
+
         y.append(float(row["sc_location"]))
         fs_est.append(float(fs))
 
@@ -181,12 +237,13 @@ def build_event_index_from_npy(
         sc_type.append(str(row["sc_type"]))
         phase_select.append(str(row["phase_select"]))
         fault_r.append(float(row["fault_resistance"]))
-        valid.append(ok)
+        valid.append(bool(ok))
 
     return EventIndex(
         rep_ids=np.asarray(rep_ids, dtype=np.int32),
-        start_idx=np.asarray(s_idx, dtype=np.int32),
-        end_idx=np.asarray(e_idx, dtype=np.int32),
+        t_fault=np.asarray(t_faults, dtype=np.float64),
+        t_start=np.asarray(t_starts, dtype=np.float64),
+        t_end=np.asarray(t_ends, dtype=np.float64),
         y=np.asarray(y, dtype=np.float32),
         fs_est=np.asarray(fs_est, dtype=np.float32),
         r1=np.asarray(r1, dtype=np.float32),
@@ -199,6 +256,7 @@ def build_event_index_from_npy(
         fault_r=np.asarray(fault_r, dtype=np.float32),
         valid=np.asarray(valid, dtype=bool),
     )
+
 
 
 # -------------------------
@@ -244,6 +302,8 @@ class FaultWindowNpyDataset(Dataset):
         npy_dir: str,
         colspec: ColumnSpec,
         pre_ms: float,
+        post_ms: float,
+        fs_target: float,
         f_nom: float = 50.0,
         window_cycles: int = 1,
         only_valid: bool = True,
@@ -253,7 +313,11 @@ class FaultWindowNpyDataset(Dataset):
     ):
         self.cache = ReplicaCache(npy_dir=npy_dir, max_items=2)
         self.colspec = colspec
-        self.pre_ms = pre_ms
+
+        self.pre_ms = float(pre_ms)
+        self.post_ms = float(post_ms)
+        self.fs_target = float(fs_target)
+
         self.f_nom = f_nom
         self.window_cycles = window_cycles
         self.normalize = normalize
@@ -266,8 +330,10 @@ class FaultWindowNpyDataset(Dataset):
         keep = event_index.valid if only_valid else np.ones_like(event_index.valid, bool)
 
         self.rep_ids = event_index.rep_ids[keep]
-        self.start_idx = event_index.start_idx[keep]
-        self.end_idx = event_index.end_idx[keep]
+        self.t_fault = event_index.t_fault[keep]
+        self.t_start = event_index.t_start[keep]
+        self.t_end = event_index.t_end[keep]
+
         self.y = event_index.y[keep]
         self.fs_est = event_index.fs_est[keep]
         self.r1 = event_index.r1[keep]
@@ -278,6 +344,12 @@ class FaultWindowNpyDataset(Dataset):
         self.sc_type = event_index.sc_type[keep]
         self.phase_select = event_index.phase_select[keep]
         self.fault_r = event_index.fault_r[keep]
+
+        # constant target length (for sanity / debugging)
+        self.T_target = int(round(((self.pre_ms + self.post_ms) / 1000.0) * self.fs_target))
+        if self.T_target <= 1:
+            raise ValueError("Computed T_target too small. Check ms/fs_target.")
+
 
     def __len__(self) -> int:
         return int(len(self.y))
@@ -302,7 +374,12 @@ class FaultWindowNpyDataset(Dataset):
                    sc_type: str, phase_select: str) -> Tuple[np.float32, np.ndarray]:
         # phasor slices
         pre_samples = int(round((self.pre_ms / 1000.0) * fs))
-        spc = int(round(fs / self.f_nom))
+        spc_float = fs / self.f_nom
+        spc = int(np.rint(spc_float))
+        if abs(spc_float - spc) > 1e-3:
+            # if not almost-integer, your fs/f_nom is inconsistent
+            # still proceed, but this is a red flag
+            pass
         cyc = self.window_cycles * spc
 
         pre_end = pre_samples
@@ -385,20 +462,44 @@ class FaultWindowNpyDataset(Dataset):
 
     def __getitem__(self, idx: int):
         rid = int(self.rep_ids[idx])
-        s = int(self.start_idx[idx])
-        e = int(self.end_idx[idx])
 
         arr = self.cache.get(rid)
-        win = np.asarray(arr[s:e, :], dtype=np.float32)
 
-        X_raw = win[:, self.colspec.keep_indices].astype(np.float32)   # (T,C)
-        X_win = self._norm_window(X_raw.copy())                        # (T,C) normalized for NN
+        # time column always index 0 in your ColumnSpec loader
+        t = np.asarray(arr[:, 0], dtype=np.float64)
+
+        # Extract only the channels you need (Va,Vb,Vc,Ia,Ib,Ic,...)
+        X_all = np.asarray(arr[:, self.colspec.keep_indices], dtype=np.float32)
+
+        t_start = float(self.t_start[idx])
+        t_end = float(self.t_end[idx])
+
+        # --- KEY FIX: resample to a fixed fs_target -> constant (T,C) for all items ---
+        X_raw = resample_window_to_fs(
+            X_all=X_all,
+            t=t,
+            t_start=t_start,
+            t_end=t_end,
+            fs_target=self.fs_target,
+        )  # (T_fixed, C)
+
+        # sanity check: guarantee constant length
+        if X_raw.shape[0] != self.T_target:
+            # Should rarely happen only due to extreme float rounding; enforce anyway
+            if X_raw.shape[0] > self.T_target:
+                X_raw = X_raw[: self.T_target, :]
+            else:
+                pad = self.T_target - X_raw.shape[0]
+                X_raw = np.pad(X_raw, ((0, pad), (0, 0)), mode="edge")
+
+        X_win = self._norm_window(X_raw.copy())
 
         y = np.float32(self.y[idx])
 
+        # --- IMPORTANT: KO now uses fs_target (stable), and pre_ms defines fault boundary ---
         classic_pct, ko_feats = self._compute_ko(
             X_raw=X_raw,
-            fs=float(self.fs_est[idx]),
+            fs=float(self.fs_target),
             r1=float(self.r1[idx]),
             x1=float(self.x1[idx]),
             r0=float(self.r0[idx]),
@@ -408,8 +509,7 @@ class FaultWindowNpyDataset(Dataset):
             phase_select=str(self.phase_select[idx]),
         )
 
-        # --- NEW: build context vector (float32) ---
-        # context = [classic_pct, ko_feats(6), r1,x1,r0,x0,L_km,(fault_r)]
+        # --- build context vector ---
         ctx_parts = [
             np.array([classic_pct], dtype=np.float32),         # (1,)
             ko_feats.astype(np.float32),                       # (6,)
@@ -418,13 +518,9 @@ class FaultWindowNpyDataset(Dataset):
                 float(self.r0[idx]), float(self.x0[idx]),
                 float(self.L_km[idx]),
             ], dtype=np.float32),                               # (5,)
+            np.array([float(self.fault_r[idx])], dtype=np.float32),  # (1,)
         ]
-
-        # Optional: include fault resistance if you added it to EventIndex/Dataset
-        if hasattr(self, "fault_r"):
-            ctx_parts.append(np.array([float(self.fault_r[idx])], dtype=np.float32))  # (1,)
-
-        context = np.concatenate(ctx_parts, axis=0).astype(np.float32)  # (12) or (13)
+        context = np.concatenate(ctx_parts, axis=0).astype(np.float32)  # (13,)
 
         if self.return_ko_feats:
             return (
@@ -432,7 +528,7 @@ class FaultWindowNpyDataset(Dataset):
                 torch.tensor(y, dtype=torch.float32),           # ()
                 torch.tensor(classic_pct, dtype=torch.float32), # ()
                 torch.from_numpy(ko_feats),                     # (6,)
-                torch.from_numpy(context),                      # (12) or (13,)
+                torch.from_numpy(context),                      # (13,)
             )
 
         return (
@@ -441,6 +537,7 @@ class FaultWindowNpyDataset(Dataset):
             torch.tensor(classic_pct, dtype=torch.float32),
             torch.from_numpy(context),
         )
+
 
 
 
