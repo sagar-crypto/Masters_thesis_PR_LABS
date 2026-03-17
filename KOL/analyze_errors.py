@@ -32,8 +32,25 @@ def analyze_plateau(model, loader, device, ctx_fault_type_idx=None, eps=1e-6, po
             yb_n = (yb / SCALE).view(-1, 1)        # (B,1)
             cb_n = (cb / SCALE).view(-1, 1)        # (B,1)
 
-            delta_n = model(xb, ctx).view(-1, 1)   # (B,1)
-            yhat_n = cb_n + delta_n                # (B,1)
+            out = model(xb, ctx)
+
+            if isinstance(out, (tuple, list)):
+                delta_n, gate_logit = out
+                # ensure (B,1) for downstream math
+                delta_n = delta_n.view(-1, 1)
+                gate_logit = gate_logit.view(-1, 1)
+
+                s = torch.sigmoid(gate_logit)
+                cb_n = (cb / SCALE).view(-1, 1)
+                cb_flip_n = 1.0 - cb_n
+                cb_used_n = s * cb_n + (1.0 - s) * cb_flip_n
+
+                yhat_n = cb_used_n + delta_n
+            else:
+                delta_n = out.view(-1, 1)
+                cb_n = (cb / SCALE).view(-1, 1)
+                yhat_n = cb_n + delta_n
+
             yhat_n = torch.clamp(yhat_n, 0.0, 1.0)
 
             # store in % for MAE reporting

@@ -20,10 +20,10 @@ from .data_processing import (
     load_column_spec,
     build_event_index_from_npy,
     FaultWindowNpyDataset,
-    compute_train_stats,
+    compute_train_stats
 )
 from .analyze_errors import analyze_plateau, fit_classic_calibration, eval_classic_baselines, eval_flip_baseline, eval_best_of_two_baseline
-from .model import WaveDeltaCNN
+from .model import WaveDeltaCNN, WaveDeltaPatchMLP
 
 
 # -------------------------
@@ -34,13 +34,14 @@ LINE_PREFIX  = "line_1_2_a"       # labels.csv column prefix for rline/xline/len
 
 PRE_MS  = 40.0
 POST_MS = 40.0
+FS_TARGET = 6400.0
 
 F_NOM = 50.0
 WINDOW_CYCLES = 1
 
 EPOCHS = 150
 BATCH_SIZE = 16
-LR = 1e-3
+LR = 3e-4
 WEIGHT_DECAY = 1e-4
 
 USE_SMOOTHL1 = True
@@ -58,6 +59,7 @@ EVAL_EPOCHS = {1, 5, 10, 20, 30, 50}
 EDGE_LO = 20.0
 EDGE_HI = 80.0
 EDGE_MULT = 2.0
+USE_MLP = True 
 
 
 def set_seed(seed: int):
@@ -84,10 +86,29 @@ def evaluate(model, loader, device):
             yb_n = yb / SCALE
             cb_n = cb / SCALE
 
-            delta_n = model(xb, ctx)              # (B,)
-            y_hat_n = cb_n + delta_n              # (B,)
-            y_hat_n = torch.clamp(y_hat_n, 0.0, 1.0)
+            out = model(xb, ctx)
 
+            # unwrap nested tuples if needed
+            while isinstance(out, (tuple, list)) and len(out) == 1:
+                out = out[0]
+
+            if isinstance(out, (tuple, list)) and len(out) == 2:
+                delta, gate_logit = out
+
+                # if delta is still nested, unwrap once more
+                if isinstance(delta, (tuple, list)) and len(delta) == 2:
+                    delta, gate_logit = delta
+
+                s = torch.sigmoid(gate_logit)
+                cb_flip_n = 1.0 - cb_n
+                cb_used_n = s * cb_n + (1.0 - s) * cb_flip_n
+                y_hat_n = cb_used_n + delta
+            else:
+                # fallback: assume out is delta tensor
+                delta = out
+                y_hat_n = cb_n + delta
+
+            y_hat_n = torch.clamp(y_hat_n, 0.0, 1.0)
             preds.append(y_hat_n.detach().cpu().numpy())
             trues.append(yb_n.detach().cpu().numpy())
 
@@ -149,12 +170,14 @@ def train_one_seed(seed: int = 42) -> dict:
         npy_dir=CACHE_FILE_PATH,
         colspec=colspec,
         pre_ms=PRE_MS,
+        post_ms=POST_MS,       # NEW
+        fs_target=FS_TARGET,   # NEW
         f_nom=F_NOM,
         window_cycles=WINDOW_CYCLES,
-        only_valid=False,           # we index explicitly by ids
-        normalize="none",           # IMPORTANT for stats
+        only_valid=False,
+        normalize="none",
         train_stats=None,
-        return_ko_feats=True
+        return_ko_feats=True,
     )
 
     mu, sigma = compute_train_stats(ds_raw, indices=tr_ids, max_items=None)
@@ -167,18 +190,24 @@ def train_one_seed(seed: int = 42) -> dict:
         npy_dir=CACHE_FILE_PATH,
         colspec=colspec,
         pre_ms=PRE_MS,
+        post_ms=POST_MS,       # NEW
+        fs_target=FS_TARGET,   # NEW
         f_nom=F_NOM,
         window_cycles=WINDOW_CYCLES,
         only_valid=False,
         normalize="train_global",
         train_stats=(mu, sigma),
-        return_ko_feats=True
+        return_ko_feats=True,
     )
+
 
     sample = ds[int(tr_ids[0])]
     # sample is (X, y, classic, ko, ctx) OR (X, y, classic, ctx) depending on your dataset
     ctx = sample[-1]
+    x0 = sample[0]
     context_dim = int(ctx.numel())  # ctx is (D,)
+    seq_len = int(x0.shape[0])
+    n_channels = int(x0.shape[1])
     print("context_dim =", context_dim)
 
     train_ds = Subset(ds, tr_ids.tolist())
@@ -230,10 +259,23 @@ def train_one_seed(seed: int = 42) -> dict:
     # -------------------------
     # Model
     # -------------------------
-    n_channels = len(colspec.keep_indices)
-    model = WaveDeltaCNN(n_channels=n_channels, context_dim=context_dim, dropout=DROPOUT).to(device)
+    if USE_MLP:
+        model = WaveDeltaPatchMLP(
+            n_channels=n_channels,
+            context_dim=context_dim,
+            seq_len=seq_len,        # IMPORTANT
+            patch_len=8,            # start with 8
+            d_model=256,
+            depth=48,               # this is your “deep MLP”
+            mlp_ratio=4,
+            dropout=0.1,
+            use_gate=False          # start WITHOUT gate
+        ).to(device)
+    else:
+        model = WaveDeltaCNN(n_channels=n_channels, context_dim=context_dim, dropout=DROPOUT).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.1, total_iters=200)
     loss_fn = nn.SmoothL1Loss(beta=0.05) if USE_SMOOTHL1 else nn.L1Loss()
 
     best_mae = float("inf")
@@ -252,9 +294,30 @@ def train_one_seed(seed: int = 42) -> dict:
             ctx = ctx.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            delta = model(xb, ctx)             # (B,)
             yb_n = yb / SCALE                  # (B,)
             cb_n = cb / SCALE                  # (B,)
+
+            out = model(xb, ctx)
+
+            # unwrap nested tuples if needed
+            while isinstance(out, (tuple, list)) and len(out) == 1:
+                out = out[0]
+
+            if isinstance(out, (tuple, list)) and len(out) == 2:
+                delta, gate_logit = out
+
+                # if delta is still nested, unwrap once more
+                if isinstance(delta, (tuple, list)) and len(delta) == 2:
+                    delta, gate_logit = delta
+
+                s = torch.sigmoid(gate_logit)
+                cb_flip_n = 1.0 - cb_n
+                cb_used_n = s * cb_n + (1.0 - s) * cb_flip_n
+                y_hat_n = cb_used_n + delta
+            else:
+                # fallback: assume out is delta tensor
+                delta = out
+                y_hat_n = cb_n + delta
 
             y_hat_n = cb_n + delta
             y_hat_n = torch.clamp(y_hat_n, 0.0, 1.0)
@@ -263,6 +326,7 @@ def train_one_seed(seed: int = 42) -> dict:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
+            scheduler.step()
 
         if epoch in EVAL_EPOCHS:
             mae = evaluate(model, test_loader, device)
