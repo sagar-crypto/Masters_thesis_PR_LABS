@@ -30,6 +30,7 @@ from KOL.common.channel_mapping import (
 from KOL.common.windowing import (
     onset_idx_from_dt_start,
     select_one_window_per_sample,
+    filter_fault_start_windows_only_with_timing
 )
 from KOL.common.operator_features import (
     compute_single_side_operator_features,
@@ -223,16 +224,42 @@ def main(config: MainConfig) -> None:
 
     df_typed: pd.DataFrame = cast(pd.DataFrame, df)
 
-    df, X_eval = select_one_window_per_sample(
-        df=df_typed,
-        X_eval=X_eval,
-        fs=fs,
-        f_nom=f_nom,
-    )
-    print(f"Subset size after selecting one window per sample_id: {len(df)}")
+    operator_window_mode = str(
+        getattr(config.training, "operator_window_mode", "single_fault_start")
+    ).lower().strip()
+
+    if operator_window_mode == "single_fault_start":
+        df, X_eval = select_one_window_per_sample(
+            df=df_typed,
+            X_eval=X_eval,
+            fs=fs,
+            f_nom=f_nom,
+        )
+        print(f"Subset size after selecting one window per sample_id: {len(df)}")
+
+    elif operator_window_mode == "all_fault_start":
+        df, X_eval = filter_fault_start_windows_only_with_timing(
+            df=df_typed,
+            X_used=X_eval,
+            fs=fs,
+            f_nom=f_nom,
+        )
+        print(f"Subset size after keeping all valid fault_start windows: {len(df)}")
+
+    else:
+        raise ValueError(
+            f"Unknown training.operator_window_mode='{operator_window_mode}'. "
+            f"Supported: single_fault_start, all_fault_start"
+        )
+
+    print("Operator window mode:", operator_window_mode)
     print("Unique sample_id count after selection:", df["sample_id"].nunique())
     print("Status distribution after selection:")
     print(df["status"].value_counts(dropna=False).to_string())
+
+    if "window_idx" in df.columns:
+        print("\nWindow index distribution after selection:")
+        print(df["window_idx"].value_counts().sort_index().to_string())
 
     spc = int(np.rint(fs / f_nom))
     onset_idx = np.rint((-df["dt_start"].astype(float)) * fs).astype(int)
@@ -555,7 +582,7 @@ def main(config: MainConfig) -> None:
 
     print(feat_df[preview_cols].head(10).to_string(index=False))
 
-    experiment_tag = f"{topology}_{operator_side_mode}_i0res_seq_bothfix"
+    experiment_tag = f"{topology}_{operator_side_mode}_{operator_window_mode}_i0res_seq_bothfix"
     out_path = f"/home/vault/iwi5/iwi5305h/kol_operator_features_{experiment_tag}.csv"
     feat_df.to_csv(out_path, index=False)
     print(f"\nSaved operator features to: {out_path}")

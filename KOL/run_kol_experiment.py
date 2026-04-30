@@ -49,6 +49,7 @@ from KOL.common.windowing import (
     filter_to_single_line_if_enabled,
     get_kol_mode,
     select_one_window_per_sample_for_kol,
+    filter_fault_start_windows_only_with_timing
 )
 from KOL.common.operator_features import load_operator_inputs_if_enabled
 from KOL.datasets.kol_datasets import make_kol_loaders
@@ -60,6 +61,10 @@ from KOL.training.kol_residual_train import (
 )
 
 logger = get_logger(__name__)
+logger.info(
+    "DEBUG save_fold_predictions loaded from: %s",
+    save_fold_predictions.__code__.co_filename,
+)
 
 
 @hydra.main(
@@ -170,10 +175,27 @@ def main(config: MainConfig) -> None:
                 f_nom=50.0
             )
         elif kol_window_mode == "all_fault_start":
-            labels_df_used, X_used_filtered = filter_fault_start_windows_only(
+            window_s = float(config.window_extraction.window_length)
+            fs = X_used_filtered.shape[1] / window_s
+
+            labels_df_used, X_used_filtered = filter_fault_start_windows_only_with_timing(
                 df=labels_df_used,
-                X_used=X_used_filtered
+                X_used=X_used_filtered,
+                fs=fs,
+                f_nom=50.0,
             )
+
+            logger.info(
+                "KOL window mode = all_fault_start with timing filter: kept %d rows | unique sample_id=%d",
+                len(labels_df_used),
+                int(labels_df_used[L.SAMPLE_ID].nunique()),
+            )
+
+            if "window_idx" in labels_df_used.columns:
+                logger.info(
+                    "Window_idx distribution after timing filter:\n%s",
+                    labels_df_used["window_idx"].value_counts().sort_index().to_string(),
+                )
         elif kol_window_mode == "all_valid":
             logger.info("KOL window mode = all_valid (no extra window filtering applied).")
         else:
@@ -306,12 +328,25 @@ def main(config: MainConfig) -> None:
         else np.asarray(groups_used)
     )
 
+    cv_mode = str(getattr(config.training, "cv_mode", "group")).lower().strip()
+    cv_stratify_col = str(getattr(config.training, "cv_stratify_col", "y_fault_location"))
+
+    logger.info(
+        "CV setup | mode=%s | stratify_col=%s | n_splits=%d",
+        cv_mode,
+        cv_stratify_col,
+        n_splits,
+    )
+
     splits = build_cv_splits_stratified(
         y_all=y_all,
         groups_np=groups_np,
         task_type=task_type,
         n_splits=n_splits,
-        seed=seed,
+        seed=int(config.training.split_seed),
+        labels_df=labels_df_used,
+        cv_mode=cv_mode,
+        stratify_col=cv_stratify_col,
     )
 
     best_lr, best_wd, eval_only, resave_eval_only = select_best_lr_wd(
@@ -607,6 +642,21 @@ def main(config: MainConfig) -> None:
                 L.Y_FAULT_LINE,
                 L.SAMPLE_ID,
             ]
+            if "window_idx" in labels_df_used.columns:
+                meta_cols.append("window_idx")
+
+            if "case" in labels_df_used.columns:
+                meta_cols.append("case")
+
+            logger.info(
+                "DEBUG about to save predictions | fold=%d | run_out_dir=%s | len(test_idx)=%d | y_true_shape=%s | y_pred_shape=%s | y_score_shape=%s",
+                fold_idx,
+                run_out_dir,
+                len(test_idx),
+                np.asarray(y_true_np).shape,
+                np.asarray(y_pred_np).shape,
+                np.asarray(y_score_np).shape,
+            )
             pred_path = save_fold_predictions(
                 out_dir=run_out_dir,
                 fold_idx=fold_idx,
@@ -617,6 +667,11 @@ def main(config: MainConfig) -> None:
                 y_score=y_score_np,
                 task_type=task_type,
                 meta_cols=meta_cols,
+                extra_cols={
+                    "d_prior": dprior_np,
+                    "residual": residual_np,
+                    "case_idx": case_np,
+                } if d_phys_prior is not None else None,
             )
             logger.info("Saved fold predictions: %s", pred_path)
         except Exception as e:

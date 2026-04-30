@@ -136,7 +136,7 @@ def edge_gated_fusion(
 
 
 def confidence_weight_from_clip_flags(is_low: int, is_high: int) -> float:
-    return 0.25 if (is_low == 1 or is_high == 1) else 1.0
+    return 0.05 if (is_low == 1 or is_high == 1) else 1.0
 
 
 def weighted_fusion_from_confidence(
@@ -341,7 +341,7 @@ def build_both_side_fusion_features(
         "is_local_clipped_high_real": feat_local["is_clipped_high_real"],
         "is_remote_clipped_low_real": feat_remote["is_clipped_low_real"],
         "is_remote_clipped_high_real": feat_remote["is_clipped_high_real"],
-        "d_phys_real_pct": d_both_mean_real_pct,
+        "d_phys_real_pct": d_both_weighted_real_pct,
         "d_phys_abs_pct": d_both_mean_abs_pct,
-        "d_phys_real_strategy": "both_mean_real",
+        "d_phys_real_strategy": "both_weighted_real",
     }

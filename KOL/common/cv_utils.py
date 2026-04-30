@@ -63,8 +63,50 @@ def build_cv_splits_stratified(
     task_type: str,
     n_splits: int,
     seed: int,
+    labels_df: Optional[pd.DataFrame] = None,
+    cv_mode: str = "group",
+    stratify_col: str = "y_fault_location",
 ):
-    if task_type == "multiclass":
+    """
+    Build grouped CV splits.
+
+    cv_mode options
+    ---------------
+    group:
+        Plain GroupKFold. Keeps groups together, but can accidentally create
+        location-held-out folds if sample_id ordering is structured.
+
+    stratified_location:
+        StratifiedGroupKFold using labels_df[stratify_col], usually y_fault_location.
+        Keeps groups together and balances fault locations across folds.
+
+    stratified_case:
+        StratifiedGroupKFold using labels_df["case"].
+
+    stratified_location_case:
+        StratifiedGroupKFold using y_fault_location + case.
+        This can fail if some location-case combinations have fewer groups than n_splits.
+
+    auto:
+        For multiclass, stratifies using y_all.
+        For regression, falls back to group unless labels_df and stratify_col are provided.
+    """
+    groups_np = np.asarray(groups_np)
+    cv_mode = str(cv_mode).lower().strip()
+
+    if cv_mode == "auto":
+        if task_type == "multiclass":
+            cv_mode = "multiclass"
+        elif labels_df is not None and stratify_col in labels_df.columns:
+            cv_mode = "stratified_location"
+        else:
+            cv_mode = "group"
+
+    if cv_mode == "group":
+        splitter = GroupKFold(n_splits=n_splits)
+        return list(splitter.split(np.zeros(len(y_all)), y_all, groups_np))
+
+    if cv_mode == "multiclass":
         splitter = StratifiedGroupKFold(
             n_splits=n_splits,
             shuffle=True,
@@ -72,8 +114,67 @@ def build_cv_splits_stratified(
         )
         return list(splitter.split(np.zeros(len(y_all)), y_all, groups_np))
 
-    splitter = GroupKFold(n_splits=n_splits)
-    return list(splitter.split(np.zeros(len(y_all)), y_all, groups_np))
+    if labels_df is None:
+        raise ValueError(
+            f"labels_df is required for cv_mode='{cv_mode}'."
+        )
+
+    if cv_mode == "stratified_location":
+        if stratify_col not in labels_df.columns:
+            raise ValueError(
+                f"labels_df does not contain stratify_col='{stratify_col}'. "
+                f"Available columns: {list(labels_df.columns)}"
+            )
+
+        y_strat = labels_df[stratify_col].astype(str).to_numpy()
+
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        return list(splitter.split(np.zeros(len(y_all)), y_strat, groups_np))
+
+    if cv_mode == "stratified_case":
+        if "case" not in labels_df.columns:
+            raise ValueError("labels_df must contain 'case' for cv_mode='stratified_case'.")
+
+        y_strat = labels_df["case"].astype(str).to_numpy()
+
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        return list(splitter.split(np.zeros(len(y_all)), y_strat, groups_np))
+
+    if cv_mode == "stratified_location_case":
+        if stratify_col not in labels_df.columns:
+            raise ValueError(
+                f"labels_df does not contain stratify_col='{stratify_col}'."
+            )
+        if "case" not in labels_df.columns:
+            raise ValueError(
+                "labels_df must contain 'case' for cv_mode='stratified_location_case'."
+            )
+
+        y_strat = (
+            labels_df[stratify_col].astype(str)
+            + "__"
+            + labels_df["case"].astype(str)
+        ).to_numpy()
+
+        splitter = StratifiedGroupKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        return list(splitter.split(np.zeros(len(y_all)), y_strat, groups_np))
+
+    raise ValueError(
+        f"Unknown cv_mode='{cv_mode}'. Supported modes: "
+        "group, auto, multiclass, stratified_location, stratified_case, stratified_location_case"
+    )
 
 
 def select_best_lr_wd(

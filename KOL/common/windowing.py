@@ -193,10 +193,13 @@ def filter_fault_start_windows_only_with_timing(
 
     work["_onset_idx"] = np.rint((-work["dt_start"].astype(float)) * fs).astype(int)
 
+    # Match compute_zapp_from_window:
+    # one full pre-fault cycle and one full post-fault cycle must fit
     work["_valid_timing"] = (
-        (work["_onset_idx"] >= 0) &
-        (work["_onset_idx"] + spc <= T)
+        (work["_onset_idx"] >= spc)
+        & (work["_onset_idx"] + spc <= T)
     )
+
     work = work.loc[work["_valid_timing"]].copy()
 
     row_idx = work["_row_idx"].to_numpy(dtype=int)

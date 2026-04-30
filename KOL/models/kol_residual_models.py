@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from KOL.common.constants import GROUND_CASE_IDS
+from KOL.common.constants import GROUND_CASE_IDS, CASE_TO_IDX
 
 
 class KOLGRUCaseResidualRegressor(nn.Module):
@@ -86,6 +86,149 @@ def apply_kol_prediction_rule(
 
     elif mode == "all_cases_add":
         pred = d_phys_prior + residual
+
+    elif mode == "non_ground_add_ground_mul":
+        pred = d_phys_prior.clone()
+
+        ground_case_ids = torch.tensor(
+            sorted(GROUND_CASE_IDS),
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ground = (case_idx.unsqueeze(1) == ground_case_ids.unsqueeze(0)).any(dim=1)
+        mask_non_ground = ~mask_ground
+
+        # Keep current stable behavior for ground faults
+        pred[mask_ground] = d_phys_prior[mask_ground] * (1.0 + residual[mask_ground])
+
+        # Allow controlled additive correction for 3ph and LL faults
+        pred[mask_non_ground] = d_phys_prior[mask_non_ground] + 0.25 * residual[mask_non_ground]
+
+    elif mode == "threeph_add_ground_mul":
+        pred = d_phys_prior.clone()
+
+        ground_case_ids = torch.tensor(
+            sorted(GROUND_CASE_IDS),
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ground = (case_idx.unsqueeze(1) == ground_case_ids.unsqueeze(0)).any(dim=1)
+
+        case_3ph_id = torch.tensor(
+            CASE_TO_IDX["3ph"],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_3ph = case_idx == case_3ph_id
+
+        # Keep the successful behavior for ground faults
+        pred[mask_ground] = d_phys_prior[mask_ground] * (1.0 + residual[mask_ground])
+
+        # Allow only 3ph to move additively
+        pred[mask_3ph] = d_phys_prior[mask_3ph] + 0.50 * residual[mask_3ph]
+
+
+    elif mode == "familywise_add_mul":
+        pred = d_phys_prior.clone()
+
+        ground_case_ids = torch.tensor(
+            sorted(GROUND_CASE_IDS),
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ground = (case_idx.unsqueeze(1) == ground_case_ids.unsqueeze(0)).any(dim=1)
+
+        case_3ph_id = torch.tensor(
+            CASE_TO_IDX["3ph"],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_3ph = case_idx == case_3ph_id
+
+        ll_case_ids = torch.tensor(
+            [
+                CASE_TO_IDX["ll_ab"],
+                CASE_TO_IDX["ll_bc"],
+                CASE_TO_IDX["ll_ca"],
+            ],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ll = (case_idx.unsqueeze(1) == ll_case_ids.unsqueeze(0)).any(dim=1)
+
+        # Ground faults: keep the stable multiplicative correction
+        pred[mask_ground] = d_phys_prior[mask_ground] * (1.0 + residual[mask_ground])
+
+        # 3ph: current best additive correction scale
+        pred[mask_3ph] = d_phys_prior[mask_3ph] + 0.50 * residual[mask_3ph]
+
+        # LL faults: small additive correction
+        pred[mask_ll] = d_phys_prior[mask_ll] + 0.10 * residual[mask_ll]
+
+    elif mode == "all_faults_casewise_safe":
+        pred = d_phys_prior.clone()
+
+        ground_case_ids = torch.tensor(
+            sorted(GROUND_CASE_IDS),
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ground = (case_idx.unsqueeze(1) == ground_case_ids.unsqueeze(0)).any(dim=1)
+
+        mask_3ph = case_idx == torch.tensor(
+            CASE_TO_IDX["3ph"],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+
+        ll_case_ids = torch.tensor(
+            [
+                CASE_TO_IDX["ll_ab"],
+                CASE_TO_IDX["ll_bc"],
+                CASE_TO_IDX["ll_ca"],
+            ],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ll = (case_idx.unsqueeze(1) == ll_case_ids.unsqueeze(0)).any(dim=1)
+
+        # Keep the current good ground-fault correction
+        pred[mask_ground] = d_phys_prior[mask_ground] * (1.0 + residual[mask_ground])
+
+        # Keep the current best 3ph correction
+        pred[mask_3ph] = d_phys_prior[mask_3ph] + 0.50 * residual[mask_3ph]
+
+        # Newly added: very conservative LL correction
+        pred[mask_ll] = d_phys_prior[mask_ll] + 0.05 * residual[mask_ll]
+    
+    elif mode == "threeph_ground_llca_add":
+        pred = d_phys_prior.clone()
+
+        ground_case_ids = torch.tensor(
+            sorted(GROUND_CASE_IDS),
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ground = (case_idx.unsqueeze(1) == ground_case_ids.unsqueeze(0)).any(dim=1)
+
+        mask_3ph = case_idx == torch.tensor(
+            CASE_TO_IDX["3ph"],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+
+        mask_llca = case_idx == torch.tensor(
+            CASE_TO_IDX["ll_ca"],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+
+        # Keep existing best corrections
+        pred[mask_ground] = d_phys_prior[mask_ground] * (1.0 + residual[mask_ground])
+        pred[mask_3ph] = d_phys_prior[mask_3ph] + 0.50 * residual[mask_3ph]
+
+        # Only correct the worst LL case, very conservatively
+        pred[mask_llca] = d_phys_prior[mask_llca] + 0.05 * residual[mask_llca]
 
     else:
         raise ValueError(
