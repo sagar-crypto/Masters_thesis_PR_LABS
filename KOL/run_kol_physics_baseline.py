@@ -1,425 +1,41 @@
 from __future__ import annotations
-from typing import cast
-from collections import Counter
 
+from collections import Counter
+from typing import cast
+
+import hydra
 import numpy as np
 import pandas as pd
-import hydra
+from psp_helper.config import MainConfig
 
 from dl_psp.data.data_utils import load_windowed_dataset
 from dl_psp.data.features import maybe_filter_features
-from dl_psp.data.filters import build_valid_row_indices_hv_double_line_90kv
-from psp_helper.config import MainConfig
-
-
-# ----------------------------
-# Physics helpers
-# ----------------------------
-
-def dft_phasor_1cycle(x: np.ndarray) -> complex:
-    n = len(x)
-    if n <= 0:
-        return 0j
-    k = np.arange(n, dtype=np.float64)
-    w = np.exp(-1j * 2.0 * np.pi * k / n)
-    return (2.0 / n) * np.sum(x.astype(np.float64) * w)
-
-
-def symm_pos_seq(a: complex, b: complex, c: complex) -> complex:
-    alpha = np.exp(1j * 2.0 * np.pi / 3.0)
-    return (a + alpha * b + (alpha ** 2) * c) / 3.0
-
-
-def k0_from_line(r1: float, x1: float, r0: float, x0: float) -> complex:
-    z1 = complex(r1, x1)
-    z0 = complex(r0, x0)
-    if abs(z1) < 1e-12:
-        return 0j
-    return (z0 - z1) / z1
-
-
-def compute_classical_distance(
-    z_app: complex,
-    r1: float,
-    x1: float,
-    line_len_km: float,
-    mode: str = "abs",
-) -> float:
-    z1 = complex(r1, x1)
-    if abs(z1) < 1e-12 or not np.isfinite(line_len_km):
-        return np.nan
-
-    if mode == "abs":
-        d = (abs(z_app) / abs(z1)) * float(line_len_km)
-    elif mode == "real":
-        d = np.real(z_app / z1) * float(line_len_km)
-    else:
-        raise ValueError(f"Unknown distance mode: {mode}")
-
-    return float(np.clip(d, 0.0, float(line_len_km)))
-
-
-def compute_zapp_from_window(
-    x_raw: np.ndarray,
-    fs: float,
-    f_nom: float,
-    r1: float,
-    x1: float,
-    r0: float,
-    x0: float,
-    case: str,
-    dt_start: float,
-) -> tuple[complex, str, str]:
-    if x_raw.shape[1] < 6:
-        return np.nan + 1j * np.nan, "invalid", "too_few_channels"
-
-    spc = int(np.rint(fs / f_nom))
-    if spc <= 1:
-        return np.nan + 1j * np.nan, "invalid", "invalid_spc"
-
-    onset_idx = onset_idx_from_dt_start(dt_start, fs)
-
-    pre_start = onset_idx - spc
-    pre_end = onset_idx
-    post_start = onset_idx
-    post_end = onset_idx + spc
-
-    if pre_start < 0:
-        return np.nan + 1j * np.nan, case, "pre_window_out_of_bounds"
-    if post_end > x_raw.shape[0]:
-        return np.nan + 1j * np.nan, case, "post_window_out_of_bounds"
-
-    Va_po = dft_phasor_1cycle(x_raw[post_start:post_end, 0])
-    Vb_po = dft_phasor_1cycle(x_raw[post_start:post_end, 1])
-    Vc_po = dft_phasor_1cycle(x_raw[post_start:post_end, 2])
-    Ia_po = dft_phasor_1cycle(x_raw[post_start:post_end, 3])
-    Ib_po = dft_phasor_1cycle(x_raw[post_start:post_end, 4])
-    Ic_po = dft_phasor_1cycle(x_raw[post_start:post_end, 5])
-
-    eps = 1e-9
-    i0_po = (Ia_po + Ib_po + Ic_po) / 3.0
-    k0 = k0_from_line(r1, x1, r0, x0)
-
-    if case == "3ph":
-        v1_po = symm_pos_seq(Va_po, Vb_po, Vc_po)
-        i1_po = symm_pos_seq(Ia_po, Ib_po, Ic_po)
-        z_po = v1_po / (i1_po + eps)
-    elif case == "slg_a":
-        z_po = Va_po / (Ia_po + k0 * i0_po + eps)
-    elif case == "slg_b":
-        z_po = Vb_po / (Ib_po + k0 * i0_po + eps)
-    elif case == "slg_c":
-        z_po = Vc_po / (Ic_po + k0 * i0_po + eps)
-    elif case == "ll_ab":
-        z_po = (Va_po - Vb_po) / ((Ia_po - Ib_po) + eps)
-    elif case == "ll_bc":
-        z_po = (Vb_po - Vc_po) / ((Ib_po - Ic_po) + eps)
-    elif case == "ll_ca":
-        z_po = (Vc_po - Va_po) / ((Ic_po - Ia_po) + eps)
-    elif case == "llg_ab":
-        z_po = (Va_po - Vb_po) / ((Ia_po - Ib_po) + k0 * i0_po + eps)
-    elif case == "llg_bc":
-        z_po = (Vb_po - Vc_po) / ((Ib_po - Ic_po) + k0 * i0_po + eps)
-    elif case == "llg_ca":
-        z_po = (Vc_po - Va_po) / ((Ic_po - Ia_po) + k0 * i0_po + eps)
-    else:
-        return np.nan + 1j * np.nan, case, "unknown_case"
-
-    if not (np.isfinite(np.real(z_po)) and np.isfinite(np.imag(z_po))):
-        return np.nan + 1j * np.nan, case, "zapp_not_finite"
-
-    return z_po, case, "ok"
-
-
-# ----------------------------
-# Column / metadata helpers
-# ----------------------------
-
-def get_line_params_for_row(row: pd.Series) -> tuple[float, float, float, float, float]:
-    line_name = str(row["y_fault_line"]).strip().lower()
-
-    mapping = {
-        "line_1_2_a": (
-            "line_1_2_a_rline",
-            "line_1_2_a_xline",
-            "line_1_2_a_rline0",
-            "line_1_2_a_xline0",
-            "line_1_2_a_length",
-        ),
-        "line_1_2_b": (
-            "line_1_2_b_rline",
-            "line_1_2_b_xline",
-            "line_1_2_b_rline0",
-            "line_1_2_b_xline0",
-            "line_1_2_b_length",
-        ),
-        "line_2_3_a": (
-            "line_2_3_a_rline",
-            "line_2_3_a_xline",
-            "line_2_3_a_rline0",
-            "line_2_3_a_xline0",
-            "line_2_3_a_length",
-        ),
-        "line_2_3_b": (
-            "line_2_3_b_rline",
-            "line_2_3_b_xline",
-            "line_2_3_b_rline0",
-            "line_2_3_b_xline0",
-            "line_2_3_b_length",
-        ),
-    }
-
-    if line_name not in mapping:
-        raise ValueError(f"Unknown y_fault_line value: {row['y_fault_line']}")
-
-    r1_col, x1_col, r0_col, x0_col, L_col = mapping[line_name]
-    return (
-        float(row[r1_col]),
-        float(row[x1_col]),
-        float(row[r0_col]),
-        float(row[x0_col]),
-        float(row[L_col]),
-    )
-
-
-def load_full_labels_csv(full_labels_path: str) -> pd.DataFrame:
-    return pd.read_csv(full_labels_path, sep=";")
-
-
-def attach_line_parameter_metadata(
-    labels_df_used: pd.DataFrame,
-    full_labels_path: str,
-) -> pd.DataFrame:
-    labels_full = load_full_labels_csv(full_labels_path)
-    df = labels_df_used.copy()
-
-    if "sample_id" not in df.columns:
-        raise ValueError("Processed labels do not contain 'sample_id'.")
-    if "rep_id" not in labels_full.columns:
-        raise ValueError("Full labels.csv does not contain 'rep_id'.")
-
-    needed_cols = [
-        "rep_id",
-        "line_1_2_a_length",
-        "line_1_2_a_xline",
-        "line_1_2_a_rline",
-        "line_1_2_a_xline0",
-        "line_1_2_a_rline0",
-        "line_1_2_b_length",
-        "line_1_2_b_xline",
-        "line_1_2_b_rline",
-        "line_1_2_b_xline0",
-        "line_1_2_b_rline0",
-        "line_2_3_a_length",
-        "line_2_3_a_xline",
-        "line_2_3_a_rline",
-        "line_2_3_a_xline0",
-        "line_2_3_a_rline0",
-        "line_2_3_b_length",
-        "line_2_3_b_xline",
-        "line_2_3_b_rline",
-        "line_2_3_b_xline0",
-        "line_2_3_b_rline0",
-    ]
-
-    missing = [c for c in needed_cols if c not in labels_full.columns]
-    if missing:
-        raise ValueError(f"Missing columns in full labels.csv: {missing}")
-
-    labels_params = labels_full[needed_cols].drop_duplicates(subset=["rep_id"])
-
-    out = df.merge(
-        labels_params,
-        left_on="sample_id",
-        right_on="rep_id",
-        how="left",
-    )
-
-    missing_rows = int(out["line_1_2_a_length"].isna().sum())
-    print(f"Merged dataframe shape: {out.shape}")
-    print(f"Rows with missing line parameters after merge: {missing_rows}")
-
-    if missing_rows > 0:
-        raise ValueError(
-            f"{missing_rows} rows could not be matched from processed labels to full labels "
-            f"using sample_id -> rep_id"
-        )
-
-    return out
-
-
-def extract_line_vi_channels(
-    x_raw: np.ndarray,
-    feature_names: list[str],
-    fault_line: str,
-) -> np.ndarray:
-    line_map = {
-        "Line_1_2_a": ("Bus_1", "Line_01_02A"),
-        "Line_1_2_b": ("Bus_1", "Line_01_02B"),
-        "Line_2_3_a": ("Bus_2", "Line_02_03A"),
-        "Line_2_3_b": ("Bus_2", "Line_02_03B"),
-    }
-
-    if fault_line not in line_map:
-        raise ValueError(f"Unknown fault_line: {fault_line}")
-
-    bus_token, line_token = line_map[fault_line]
-    name_to_idx = {name: i for i, name in enumerate(feature_names)}
-
-    i1 = name_to_idx[f"{bus_token}_{line_token}_cur_L1_A"]
-    i2 = name_to_idx[f"{bus_token}_{line_token}_cur_L2_A"]
-    i3 = name_to_idx[f"{bus_token}_{line_token}_cur_L3_A"]
-    v1 = name_to_idx[f"{bus_token}_{line_token}_vol_L1_V"]
-    v2 = name_to_idx[f"{bus_token}_{line_token}_vol_L2_V"]
-    v3 = name_to_idx[f"{bus_token}_{line_token}_vol_L3_V"]
-
-    return np.stack(
-        [
-            x_raw[:, v1],
-            x_raw[:, v2],
-            x_raw[:, v3],
-            x_raw[:, i1],
-            x_raw[:, i2],
-            x_raw[:, i3],
-        ],
-        axis=1,
-    )
-
-
-def onset_idx_from_dt_start(dt_start: float, fs: float) -> int:
-    return int(np.rint((-float(dt_start)) * float(fs)))
-
-
-def derive_fault_case_from_processed_labels(row: pd.Series) -> str:
-    a = int(row["y_phase_A"])
-    b = int(row["y_phase_B"])
-    c = int(row["y_phase_C"])
-    grounded = int(row["y_is_grounded"])
-
-    phases = []
-    if a == 1:
-        phases.append("a")
-    if b == 1:
-        phases.append("b")
-    if c == 1:
-        phases.append("c")
-
-    if len(phases) == 3:
-        return "3ph"
-
-    if len(phases) == 1:
-        if grounded == 1:
-            return f"slg_{phases[0]}"
-        return "invalid"
-
-    if len(phases) == 2:
-        pair = "".join(phases)
-        if pair == "ac":
-            pair = "ca"
-        if grounded == 1:
-            return f"llg_{pair}"
-        return f"ll_{pair}"
-
-    return "invalid"
-
-
-def select_one_window_per_sample(
-    df: pd.DataFrame,
-    X_eval: np.ndarray,
-    fs: float,
-    f_nom: float,
-) -> tuple[pd.DataFrame, np.ndarray]:
-    if "sample_id" not in df.columns:
-        raise ValueError("df must contain 'sample_id'")
-    if "dt_start" not in df.columns:
-        raise ValueError("df must contain 'dt_start'")
-    if "status" not in df.columns:
-        raise ValueError("df must contain 'status'")
-
-    work = df.copy().reset_index(drop=True)
-    work["_row_idx"] = np.arange(len(work))
-
-    spc = int(np.rint(fs / f_nom))
-    T = X_eval.shape[1]
-
-    work = work.loc[
-        work["status"].astype(str).str.lower() == "fault_start"
-    ].copy()
-
-    work["_onset_idx"] = np.rint((-work["dt_start"].astype(float)) * fs).astype(int)
-
-    work["_valid_timing"] = (
-        (work["_onset_idx"] >= spc) &
-        (work["_onset_idx"] + spc <= T)
-    )
-
-    work = work.loc[work["_valid_timing"]].copy()
-
-    target_idx = T // 2
-    work["_timing_score"] = np.abs(work["_onset_idx"] - target_idx)
-
-    work = work.sort_values(
-        ["sample_id", "_timing_score", "window_idx"],
-        ascending=[True, True, True],
-    ).reset_index(drop=True)
-
-    selected = work.groupby("sample_id", as_index=False).first()
-
-    row_idx = selected["_row_idx"].to_numpy(dtype=int)
-    X_sel = X_eval[row_idx]
-
-    selected = selected.drop(
-        columns=["_row_idx", "_onset_idx", "_valid_timing", "_timing_score"],
-        errors="ignore",
-    )
-
-    return selected.reset_index(drop=True), X_sel
-
-
-# ----------------------------
-# Audit helpers
-# ----------------------------
-
-def formula_name_for_case(case: str) -> str:
-    mapping = {
-        "3ph": "positive-sequence: Z = V1 / I1",
-        "slg_a": "single-line-ground A: Z = Va / (Ia + k0*I0)",
-        "slg_b": "single-line-ground B: Z = Vb / (Ib + k0*I0)",
-        "slg_c": "single-line-ground C: Z = Vc / (Ic + k0*I0)",
-        "ll_ab": "line-line AB: Z = (Va - Vb) / (Ia - Ib)",
-        "ll_bc": "line-line BC: Z = (Vb - Vc) / (Ib - Ic)",
-        "ll_ca": "line-line CA: Z = (Vc - Va) / (Ic - Ia)",
-        "llg_ab": "double-line-ground AB: Z = (Va - Vb) / ((Ia - Ib) + k0*I0)",
-        "llg_bc": "double-line-ground BC: Z = (Vb - Vc) / ((Ib - Ic) + k0*I0)",
-        "llg_ca": "double-line-ground CA: Z = (Vc - Va) / ((Ic - Ia) + k0*I0)",
-    }
-    return mapping.get(case, "unknown")
-
-
-def get_line_vi_channel_names(
-    feature_names: list[str],
-    fault_line: str,
-) -> list[str]:
-    line_map = {
-        "Line_1_2_a": ("Bus_1", "Line_01_02A"),
-        "Line_1_2_b": ("Bus_1", "Line_01_02B"),
-        "Line_2_3_a": ("Bus_2", "Line_02_03A"),
-        "Line_2_3_b": ("Bus_2", "Line_02_03B"),
-    }
-
-    if fault_line not in line_map:
-        raise ValueError(f"Unknown fault_line: {fault_line}")
-
-    bus_token, line_token = line_map[fault_line]
-
-    return [
-        f"{bus_token}_{line_token}_vol_L1_V",
-        f"{bus_token}_{line_token}_vol_L2_V",
-        f"{bus_token}_{line_token}_vol_L3_V",
-        f"{bus_token}_{line_token}_cur_L1_A",
-        f"{bus_token}_{line_token}_cur_L2_A",
-        f"{bus_token}_{line_token}_cur_L3_A",
-    ]
+from dl_psp.data.filters import (
+    build_valid_row_indices_hv_double_line_90kv,
+    build_valid_row_indices_hv_double_line_110kv,
+)
+
+from KOL.common.cases import (
+    derive_fault_case_from_processed_labels,
+    formula_name_for_case,
+)
+from KOL.common.line_utils import (
+    attach_line_parameter_metadata,
+    get_line_params_for_row,
+)
+from KOL.common.channel_mapping import (
+    extract_line_vi_channels,
+    get_line_vi_channel_names,
+)
+from KOL.common.windowing import (
+    onset_idx_from_dt_start,
+    select_one_window_per_sample,
+    filter_fault_start_windows_only_with_timing
+)
+from KOL.common.operator_features import (
+    compute_single_side_operator_features,
+    build_both_side_fusion_features,
+)
 
 
 def audit_case_and_formula_mapping(
@@ -477,7 +93,7 @@ def audit_case_and_formula_mapping(
         else:
             expected_case = "invalid"
 
-        case_ok = (case == expected_case)
+        case_ok = case == expected_case
 
         rows.append(
             {
@@ -515,10 +131,6 @@ def audit_case_and_formula_mapping(
     return audit_df
 
 
-# ----------------------------
-# Main
-# ----------------------------
-
 @hydra.main(
     version_base=None,
     config_path="../third_party/dl_fault_repo/config",
@@ -527,6 +139,10 @@ def audit_case_and_formula_mapping(
 def main(config: MainConfig) -> None:
     print("Loading processed windows...")
     X, labels_df, meta = load_windowed_dataset(config)
+    print(
+        "DEBUG build_both_side_fusion_features loaded from:",
+        build_both_side_fusion_features.__code__.co_filename,
+    )
 
     include_groups = config.training.feature_groups_include
     materialize = config.training.materialize_feature_filters
@@ -537,9 +153,20 @@ def main(config: MainConfig) -> None:
         materialize=materialize,
     )
 
-    valid_row_idx = build_valid_row_indices_hv_double_line_90kv(
-        labels_df, "y_fault_location"
-    )
+    topology = str(config.dataset.topology)
+    print(f"Running physics baseline for topology: {topology}")
+
+    if topology == "hv_double_line_90kv":
+        valid_row_idx = build_valid_row_indices_hv_double_line_90kv(
+            labels_df, "y_fault_location"
+        )
+    elif topology == "hv_double_line_110kv":
+        valid_row_idx = build_valid_row_indices_hv_double_line_110kv(
+            labels_df, "y_fault_location"
+        )
+    else:
+        raise ValueError(f"Unsupported topology for this baseline script: {topology}")
+
     if valid_row_idx is None:
         labels_df_used = labels_df.reset_index(drop=True)
         X_valid = X_used
@@ -556,10 +183,17 @@ def main(config: MainConfig) -> None:
     f_nom = 50.0
     y_col = "y_fault_location"
 
-    full_labels_path = "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels.csv"
+    if topology == "hv_double_line_90kv":
+        full_labels_path = "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels.csv"
+    elif topology == "hv_double_line_110kv":
+        full_labels_path = None
+    else:
+        raise ValueError(f"No full_labels_path configured for topology: {topology}")
+
     df = attach_line_parameter_metadata(
         labels_df_used=labels_df_used,
         full_labels_path=full_labels_path,
+        topology=topology,
     )
     X_eval = X_valid
 
@@ -592,16 +226,44 @@ def main(config: MainConfig) -> None:
     fs = T_full / window_s
     print(f"Inferred fs: {fs:.3f} Hz from T={T_full}, window={window_s:.6f}s")
 
-    df, X_eval = select_one_window_per_sample(
-        df=df,
-        X_eval=X_eval,
-        fs=fs,
-        f_nom=f_nom,
-    )
-    print(f"Subset size after selecting one window per sample_id: {len(df)}")
+    df_typed: pd.DataFrame = cast(pd.DataFrame, df)
+
+    operator_window_mode = str(
+        getattr(config.training, "operator_window_mode", "single_fault_start")
+    ).lower().strip()
+
+    if operator_window_mode == "single_fault_start":
+        df, X_eval = select_one_window_per_sample(
+            df=df_typed,
+            X_eval=X_eval,
+            fs=fs,
+            f_nom=f_nom,
+        )
+        print(f"Subset size after selecting one window per sample_id: {len(df)}")
+
+    elif operator_window_mode == "all_fault_start":
+        df, X_eval = filter_fault_start_windows_only_with_timing(
+            df=df_typed,
+            X_used=X_eval,
+            fs=fs,
+            f_nom=f_nom,
+        )
+        print(f"Subset size after keeping all valid fault_start windows: {len(df)}")
+
+    else:
+        raise ValueError(
+            f"Unknown training.operator_window_mode='{operator_window_mode}'. "
+            f"Supported: single_fault_start, all_fault_start"
+        )
+
+    print("Operator window mode:", operator_window_mode)
     print("Unique sample_id count after selection:", df["sample_id"].nunique())
     print("Status distribution after selection:")
     print(df["status"].value_counts(dropna=False).to_string())
+
+    if "window_idx" in df.columns:
+        print("\nWindow index distribution after selection:")
+        print(df["window_idx"].value_counts().sort_index().to_string())
 
     spc = int(np.rint(fs / f_nom))
     onset_idx = np.rint((-df["dt_start"].astype(float)) * fs).astype(int)
@@ -627,6 +289,12 @@ def main(config: MainConfig) -> None:
     audit_df.to_csv(audit_path, index=False)
     print(f"\nSaved audit CSV to: {audit_path}")
 
+    operator_side_mode = str(
+        getattr(config.training, "operator_side_mode", "default")
+    ).lower().strip()
+
+    print(f"Operator side mode: {operator_side_mode}")
+
     rows = []
     reason_counts = Counter()
 
@@ -639,69 +307,201 @@ def main(config: MainConfig) -> None:
             reason_counts["invalid_case_from_processed_labels"] += 1
             continue
 
-        x_vi = extract_line_vi_channels(
-            x_raw=x_raw_full,
-            feature_names=feature_names,
-            fault_line=str(row["y_fault_line"]),
+        r1, x1, r0, x0, L_km = get_line_params_for_row(
+            row=row,
+            topology=topology,
         )
 
-        r1, x1, r0, x0, L_km = get_line_params_for_row(row)
-
-        z_app, case, reason = compute_zapp_from_window(
-            x_raw=x_vi,
-            fs=fs,
-            f_nom=float(f_nom),
-            r1=r1,
-            x1=x1,
-            r0=r0,
-            x0=x0,
-            case=case,
-            dt_start=float(row["dt_start"]),
-        )
-
-        if reason != "ok":
-            reason_counts[reason] += 1
+        if L_km <= 1e-12:
+            reason_counts["invalid_line_length"] += 1
             continue
 
-        z1 = complex(r1, x1)
+        if operator_side_mode in {"default", "opposite"}:
+            try:
+                x_vi, used_sides = extract_line_vi_channels(
+                    x_raw=x_raw_full,
+                    feature_names=feature_names,
+                    fault_line=str(row["y_fault_line"]),
+                    side_mode=operator_side_mode,
+                )
+            except Exception as e:
+                reason_counts[f"channel_mapping_error: {type(e).__name__}"] += 1
+                continue
 
-        ratio_real = float(np.real(z_app / (z1 + 1e-12)))
-        ratio_abs = float(abs(z_app) / (abs(z1) + 1e-12))
+            feat = compute_single_side_operator_features(
+                    x_vi=x_vi,
+                    fs=fs,
+                    f_nom=float(f_nom),
+                    r1=r1,
+                    x1=x1,
+                    r0=r0,
+                    x0=x0,
+                    L_km=L_km,
+                    case=case,
+                    dt_start=float(row["dt_start"]),
+                    onset_idx_from_dt_start_fn=onset_idx_from_dt_start,
+                )
 
-        d_phys_raw_real_km = float(ratio_real * L_km)
-        d_phys_clipped_real_km = float(np.clip(d_phys_raw_real_km, 0.0, L_km))
-        d_phys_real_pct = float(100.0 * d_phys_clipped_real_km / L_km)
+            if feat["reason"] != "ok":
+                reason_counts[feat["reason"]] += 1
+                continue
 
-        d_phys_raw_abs_km = float(ratio_abs * L_km)
-        d_phys_clipped_abs_km = float(np.clip(d_phys_raw_abs_km, 0.0, L_km))
-        d_phys_abs_pct = float(100.0 * d_phys_clipped_abs_km / L_km)
-
-        rows.append(
-            {
+            row_out = {
                 "sample_id": row["sample_id"],
                 "window_idx": row["window_idx"],
                 "status": row["status"],
                 "dt_start": float(row["dt_start"]),
                 "y_fault_line": row["y_fault_line"],
                 "y_fault_location": float(row[y_col]),
-                "case": case,
+                "case": feat["case"],
                 "r1": r1,
                 "x1": x1,
                 "r0": r0,
                 "x0": x0,
                 "line_len_km": L_km,
-                "z_app_real": float(np.real(z_app)),
-                "z_app_imag": float(np.imag(z_app)),
-                "ratio_real": ratio_real,
-                "ratio_abs": ratio_abs,
-                "d_phys_raw_real_km": d_phys_raw_real_km,
-                "d_phys_clipped_real_km": d_phys_clipped_real_km,
-                "d_phys_real_pct": d_phys_real_pct,
-                "d_phys_raw_abs_km": d_phys_raw_abs_km,
-                "d_phys_clipped_abs_km": d_phys_clipped_abs_km,
-                "d_phys_abs_pct": d_phys_abs_pct,
+                "operator_side_mode": operator_side_mode,
+                "used_sides": " | ".join(used_sides),
             }
-        )
+
+            # Add every operator feature, including new Takagi columns.
+            # Do not overwrite metadata columns already set above.
+            for k, v in feat.items():
+                if k not in row_out:
+                    row_out[k] = v
+            rows.append(row_out)
+
+        elif operator_side_mode == "both":
+            try:
+                x_vi_local, used_local = extract_line_vi_channels(
+                    x_raw=x_raw_full,
+                    feature_names=feature_names,
+                    fault_line=str(row["y_fault_line"]),
+                    side_mode="default",
+                )
+                x_vi_remote, used_remote = extract_line_vi_channels(
+                    x_raw=x_raw_full,
+                    feature_names=feature_names,
+                    fault_line=str(row["y_fault_line"]),
+                    side_mode="opposite",
+                )
+            except Exception as e:
+                reason_counts[f"channel_mapping_error: {type(e).__name__}"] += 1
+                continue
+
+            feat_local = compute_single_side_operator_features(
+                x_vi=x_vi_local,
+                fs=fs,
+                f_nom=float(f_nom),
+                r1=r1,
+                x1=x1,
+                r0=r0,
+                x0=x0,
+                L_km=L_km,
+                case=case,
+                dt_start=float(row["dt_start"]),
+                onset_idx_from_dt_start_fn=onset_idx_from_dt_start,
+            )
+
+            feat_remote = compute_single_side_operator_features(
+                x_vi=x_vi_remote,
+                fs=fs,
+                f_nom=float(f_nom),
+                r1=r1,
+                x1=x1,
+                r0=r0,
+                x0=x0,
+                L_km=L_km,
+                case=case,
+                dt_start=float(row["dt_start"]),
+                onset_idx_from_dt_start_fn=onset_idx_from_dt_start,
+            )
+
+            if feat_local["reason"] != "ok":
+                reason_counts[f"local_{feat_local['reason']}"] += 1
+                continue
+            if feat_remote["reason"] != "ok":
+                reason_counts[f"remote_{feat_remote['reason']}"] += 1
+                continue
+
+            fusion = build_both_side_fusion_features(feat_local, feat_remote)
+
+            row_out = {
+                "sample_id": row["sample_id"],
+                "window_idx": row["window_idx"],
+                "status": row["status"],
+                "dt_start": float(row["dt_start"]),
+                "y_fault_line": row["y_fault_line"],
+                "y_fault_location": float(row[y_col]),
+                "case": feat_local["case"],
+                "r1": r1,
+                "x1": x1,
+                "r0": r0,
+                "x0": x0,
+                "line_len_km": L_km,
+                "operator_side_mode": operator_side_mode,
+                "used_sides": " | ".join(used_local + used_remote),
+
+                # local-side details
+                "z_app_local_real": feat_local["z_app_real"],
+                "z_app_local_imag": feat_local["z_app_imag"],
+                "ratio_real_local": feat_local["ratio_real"],
+                "ratio_abs_local": feat_local["ratio_abs"],
+
+                "abs_V0_local": feat_local["abs_V0"],
+                "abs_V1_local": feat_local["abs_V1"],
+                "abs_V2_local": feat_local["abs_V2"],
+                "abs_I0_local": feat_local["abs_I0"],
+                "abs_I1_local": feat_local["abs_I1"],
+                "abs_I2_local": feat_local["abs_I2"],
+                "ratio_V0_V1_local": feat_local["ratio_V0_V1"],
+                "ratio_V2_V1_local": feat_local["ratio_V2_V1"],
+                "ratio_I0_I1_local": feat_local["ratio_I0_I1"],
+                "ratio_I2_I1_local": feat_local["ratio_I2_I1"],
+                "abs_Z0_app_local": feat_local["abs_Z0_app"],
+                "abs_Z1_app_local": feat_local["abs_Z1_app"],
+                "abs_Z2_app_local": feat_local["abs_Z2_app"],
+
+                # remote-side details
+                "z_app_remote_real": feat_remote["z_app_real"],
+                "z_app_remote_imag": feat_remote["z_app_imag"],
+                "ratio_real_remote": feat_remote["ratio_real"],
+                "ratio_abs_remote": feat_remote["ratio_abs"],
+
+                "abs_V0_remote": feat_remote["abs_V0"],
+                "abs_V1_remote": feat_remote["abs_V1"],
+                "abs_V2_remote": feat_remote["abs_V2"],
+                "abs_I0_remote": feat_remote["abs_I0"],
+                "abs_I1_remote": feat_remote["abs_I1"],
+                "abs_I2_remote": feat_remote["abs_I2"],
+                "ratio_V0_V1_remote": feat_remote["ratio_V0_V1"],
+                "ratio_V2_V1_remote": feat_remote["ratio_V2_V1"],
+                "ratio_I0_I1_remote": feat_remote["ratio_I0_I1"],
+                "ratio_I2_I1_remote": feat_remote["ratio_I2_I1"],
+                "abs_Z0_app_remote": feat_remote["abs_Z0_app"],
+                "abs_Z1_app_remote": feat_remote["abs_Z1_app"],
+                "abs_Z2_app_remote": feat_remote["abs_Z2_app"],
+
+                # optional single-side Takagi diagnostics too
+                "d_takagi_local_raw_pct": feat_local.get("d_takagi_pct", np.nan),
+                "d_takagi_remote_raw_pct": feat_remote.get("d_takagi_pct", np.nan),
+                "takagi_valid_local_raw": feat_local.get("takagi_valid", 0),
+                "takagi_valid_remote_raw": feat_remote.get("takagi_valid", 0),
+                "takagi_reason_local_raw": feat_local.get("takagi_reason", ""),
+                "takagi_reason_remote_raw": feat_remote.get("takagi_reason", ""),
+            }
+
+            # Add all fused both-side features, including Takagi and future operator columns.
+            # This also correctly uses fusion["d_phys_real_strategy"] instead of hardcoding.
+            for k, v in fusion.items():
+                if k not in row_out:
+                    row_out[k] = v
+
+
+            rows.append(row_out)
+
+        else:
+            reason_counts[f"unsupported_side_mode_{operator_side_mode}"] += 1
+            continue
 
     feat_df = pd.DataFrame(rows)
 
@@ -717,23 +517,36 @@ def main(config: MainConfig) -> None:
         raise RuntimeError("No operator features were produced.")
 
     print("\nOperator feature preview:")
-    print(
-        feat_df[
-            [
-                "sample_id",
-                "window_idx",
-                "y_fault_line",
-                "y_fault_location",
-                "case",
-                "d_phys_real_pct",
-                "d_phys_abs_pct",
-                "ratio_real",
-                "ratio_abs",
-            ]
-        ].head(10).to_string(index=False)
-    )
+    preview_cols = [
+        "sample_id",
+        "window_idx",
+        "y_fault_line",
+        "y_fault_location",
+        "case",
+        "d_phys_real_pct",
+        "d_phys_abs_pct",
+    ]
 
-    out_path = "/home/vault/iwi5/iwi5305h/kol_operator_features.csv"
+    extra_candidates = [
+        "ratio_real",
+        "ratio_abs",
+        "ratio_V2_V1",
+        "ratio_I2_I1",
+        "d_both_mean_real_pct",
+        "d_both_diff_real_pct",
+        "d_both_disagreement_real_pct",
+        "d_both_min_real_pct",
+        "d_both_max_real_pct",
+        "d_both_edge_gated_real_pct",
+        "d_both_weighted_real_pct",
+        "d_phys_real_strategy",
+    ]
+    preview_cols.extend([c for c in extra_candidates if c in feat_df.columns])
+
+    print(feat_df[preview_cols].head(10).to_string(index=False))
+
+    experiment_tag = f"{topology}_{operator_side_mode}_{operator_window_mode}_i0res_seq_bothfix"
+    out_path = f"/home/vault/iwi5/iwi5305h/kol_operator_features_{experiment_tag}.csv"
     feat_df.to_csv(out_path, index=False)
     print(f"\nSaved operator features to: {out_path}")
 
