@@ -230,6 +230,39 @@ def apply_kol_prediction_rule(
         # Only correct the worst LL case, very conservatively
         pred[mask_llca] = d_phys_prior[mask_llca] + 0.05 * residual[mask_llca]
 
+    elif mode == "all_cases_add_010":
+        pred = d_phys_prior + 0.10 * residual
+
+    elif mode == "threeph_add_ground_mul_025":
+        pred = d_phys_prior.clone()
+
+        ground_case_ids = torch.tensor(
+            sorted(GROUND_CASE_IDS),
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_ground = (case_idx.unsqueeze(1) == ground_case_ids.unsqueeze(0)).any(dim=1)
+
+        case_3ph_id = torch.tensor(
+            CASE_TO_IDX["3ph"],
+            device=case_idx.device,
+            dtype=case_idx.dtype,
+        )
+        mask_3ph = case_idx == case_3ph_id
+
+        # Smaller correction because Takagi-local prior is already stronger
+        pred[mask_ground] = d_phys_prior[mask_ground] * (
+            1.0 + 0.25 * residual[mask_ground]
+        )
+
+        pred[mask_3ph] = d_phys_prior[mask_3ph] + 0.25 * residual[mask_3ph]
+
+    elif mode == "all_cases_add_025":
+        pred = d_phys_prior + 0.25 * residual
+
+    elif mode == "all_cases_add_050":
+        pred = d_phys_prior + 0.50 * residual
+
     else:
         raise ValueError(
             f"Unknown KOL prediction mode '{mode}'. "

@@ -213,6 +213,196 @@ def classical_alpha_torch(device: torch.device) -> torch.Tensor:
         device=device,
     )
 
+def compute_loop_phasors_for_case(
+    Va: complex,
+    Vb: complex,
+    Vc: complex,
+    Ia: complex,
+    Ib: complex,
+    Ic: complex,
+    r1: float,
+    x1: float,
+    r0: float,
+    x0: float,
+    case: str,
+) -> tuple[complex, complex, str]:
+    """
+    Build voltage/current loop phasors for the selected fault case.
+
+    Returns:
+        V_loop, I_loop, reason
+    """
+    eps = 1e-9
+    case = str(case).lower().strip()
+
+    i0_res = Ia + Ib + Ic
+    k0 = k0_from_line(r1, x1, r0, x0)
+
+    if case == "3ph":
+        V_loop = symm_pos_seq(Va, Vb, Vc)
+        I_loop = symm_pos_seq(Ia, Ib, Ic)
+
+    elif case == "slg_a":
+        V_loop = Va
+        I_loop = Ia + k0 * i0_res
+
+    elif case == "slg_b":
+        V_loop = Vb
+        I_loop = Ib + k0 * i0_res
+
+    elif case == "slg_c":
+        V_loop = Vc
+        I_loop = Ic + k0 * i0_res
+
+    elif case == "ll_ab":
+        V_loop = Va - Vb
+        I_loop = Ia - Ib
+
+    elif case == "ll_bc":
+        V_loop = Vb - Vc
+        I_loop = Ib - Ic
+
+    elif case == "ll_ca":
+        V_loop = Vc - Va
+        I_loop = Ic - Ia
+
+    elif case == "llg_ab":
+        V_loop = Va - Vb
+        I_loop = Ia - Ib
+
+    elif case == "llg_bc":
+        V_loop = Vb - Vc
+        I_loop = Ib - Ic
+
+    elif case == "llg_ca":
+        V_loop = Vc - Va
+        I_loop = Ic - Ia
+
+    else:
+        return np.nan + 1j * np.nan, np.nan + 1j * np.nan, "unknown_case"
+
+    if abs(I_loop) < eps:
+        return V_loop, I_loop, "loop_current_too_small"
+
+    return V_loop, I_loop, "ok"
+
+
+def compute_takagi_distance_from_window(
+    x_raw: np.ndarray,
+    fs: float,
+    f_nom: float,
+    r1: float,
+    x1: float,
+    r0: float,
+    x0: float,
+    case: str,
+    dt_start: float,
+    onset_idx_from_dt_start_fn,
+) -> tuple[float, str]:
+    """
+    Compute Takagi-style distance estimate in percent of line length.
+
+    Uses:
+        I_sup = I_loop_post - I_loop_pre
+
+        m = imag(V_loop_post * conj(I_sup))
+            / imag(Z1 * I_loop_post * conj(I_sup))
+
+    Here Z1 is used consistently with the existing operator convention.
+    Output is clipped to [0, 100].
+    """
+    if x_raw.shape[1] not in {6, 12}:
+        return float("nan"), f"unexpected_channel_count_{x_raw.shape[1]}"
+
+    if x_raw.shape[1] == 12:
+        x_raw = x_raw[:, :6]
+
+    spc = int(np.rint(fs / f_nom))
+    if spc <= 1:
+        return float("nan"), "invalid_spc"
+
+    onset_idx = onset_idx_from_dt_start_fn(dt_start, fs)
+
+    pre_start = onset_idx - spc
+    pre_end = onset_idx
+    post_start = onset_idx
+    post_end = onset_idx + spc
+
+    if pre_start < 0:
+        return float("nan"), "pre_window_out_of_bounds"
+    if post_end > x_raw.shape[0]:
+        return float("nan"), "post_window_out_of_bounds"
+
+    # Pre-fault phasors
+    Va_pre = dft_phasor_1cycle(x_raw[pre_start:pre_end, 0])
+    Vb_pre = dft_phasor_1cycle(x_raw[pre_start:pre_end, 1])
+    Vc_pre = dft_phasor_1cycle(x_raw[pre_start:pre_end, 2])
+    Ia_pre = dft_phasor_1cycle(x_raw[pre_start:pre_end, 3])
+    Ib_pre = dft_phasor_1cycle(x_raw[pre_start:pre_end, 4])
+    Ic_pre = dft_phasor_1cycle(x_raw[pre_start:pre_end, 5])
+
+    # Post-fault phasors
+    Va_po = dft_phasor_1cycle(x_raw[post_start:post_end, 0])
+    Vb_po = dft_phasor_1cycle(x_raw[post_start:post_end, 1])
+    Vc_po = dft_phasor_1cycle(x_raw[post_start:post_end, 2])
+    Ia_po = dft_phasor_1cycle(x_raw[post_start:post_end, 3])
+    Ib_po = dft_phasor_1cycle(x_raw[post_start:post_end, 4])
+    Ic_po = dft_phasor_1cycle(x_raw[post_start:post_end, 5])
+
+    V_loop_po, I_loop_po, reason_po = compute_loop_phasors_for_case(
+        Va=Va_po,
+        Vb=Vb_po,
+        Vc=Vc_po,
+        Ia=Ia_po,
+        Ib=Ib_po,
+        Ic=Ic_po,
+        r1=r1,
+        x1=x1,
+        r0=r0,
+        x0=x0,
+        case=case,
+    )
+
+    _, I_loop_pre, reason_pre = compute_loop_phasors_for_case(
+        Va=Va_pre,
+        Vb=Vb_pre,
+        Vc=Vc_pre,
+        Ia=Ia_pre,
+        Ib=Ib_pre,
+        Ic=Ic_pre,
+        r1=r1,
+        x1=x1,
+        r0=r0,
+        x0=x0,
+        case=case,
+    )
+
+    if reason_po != "ok":
+        return float("nan"), f"post_{reason_po}"
+    if reason_pre != "ok":
+        return float("nan"), f"pre_{reason_pre}"
+
+    I_sup = I_loop_po - I_loop_pre
+
+    if abs(I_sup) < 1e-9:
+        return float("nan"), "superposition_current_too_small"
+
+    z1 = complex(r1, x1)
+
+    numerator = np.imag(V_loop_po * np.conj(I_sup))
+    denominator = np.imag(z1 * I_loop_po * np.conj(I_sup))
+
+    if abs(denominator) < 1e-9:
+        return float("nan"), "takagi_denominator_too_small"
+
+    d_pu = numerator / denominator
+    d_pct = 100.0 * float(d_pu)
+
+    if not np.isfinite(d_pct):
+        return float("nan"), "takagi_not_finite"
+
+    d_pct = float(np.clip(d_pct, 0.0, 100.0))
+    return d_pct, "ok"
 
 def compute_distance_with_learned_params(
     batch: dict,

@@ -5,7 +5,7 @@ import pandas as pd
 from typing import Optional
 
 from KOL.common.signal_ops import dft_phasor_1cycle, symm_pos_seq, symm_zero_seq, symm_neg_seq
-from KOL.common.physics_core import compute_zapp_from_window
+from KOL.common.physics_core import compute_zapp_from_window, compute_takagi_distance_from_window
 from psp_helper.config import MainConfig
 
 
@@ -183,6 +183,18 @@ def compute_single_side_operator_features(
             "case": case_out,
         }
 
+    d_takagi_pct, takagi_reason = compute_takagi_distance_from_window(
+        x_raw=x_vi,
+        fs=fs,
+        f_nom=f_nom,
+        r1=r1,
+        x1=x1,
+        r0=r0,
+        x0=x0,
+        case=case,
+        dt_start=dt_start,
+        onset_idx_from_dt_start_fn=onset_idx_from_dt_start_fn,
+    )
     z1 = complex(r1, x1)
     ratio_real = float(np.real(z_app / (z1 + 1e-12)))
     ratio_abs = float(abs(z_app) / (abs(z1) + 1e-12))
@@ -266,6 +278,9 @@ def compute_single_side_operator_features(
         "d_phys_raw_abs_pct": d_phys_raw_abs_pct,
         "is_clipped_low_abs": is_clipped_low_abs,
         "is_clipped_high_abs": is_clipped_high_abs,
+        "d_takagi_pct": d_takagi_pct,
+        "takagi_reason": takagi_reason,
+        "takagi_valid": int(np.isfinite(d_takagi_pct)),
     }
 
 
@@ -307,6 +322,27 @@ def build_both_side_fusion_features(
         w_local=w_local_real,
         w_remote=w_remote_real,
     )
+    d_takagi_local_pct = feat_local.get("d_takagi_pct", np.nan)
+    d_takagi_remote_pct = feat_remote.get("d_takagi_pct", np.nan)
+
+    d_takagi_remote_flipped_pct = (
+        100.0 - d_takagi_remote_pct
+        if np.isfinite(d_takagi_remote_pct)
+        else np.nan
+    )
+
+    if np.isfinite(d_takagi_local_pct) and np.isfinite(d_takagi_remote_flipped_pct):
+        d_takagi_both_mean_pct = 0.5 * (
+            d_takagi_local_pct + d_takagi_remote_flipped_pct
+        )
+        d_takagi_both_diff_pct = (
+            d_takagi_local_pct - d_takagi_remote_flipped_pct
+        )
+        d_takagi_both_disagreement_pct = abs(d_takagi_both_diff_pct)
+    else:
+        d_takagi_both_mean_pct = np.nan
+        d_takagi_both_diff_pct = np.nan
+        d_takagi_both_disagreement_pct = np.nan
 
     d_local_abs_pct = feat_local["d_phys_abs_pct"]
     d_remote_abs_pct = feat_remote["d_phys_abs_pct"]
@@ -344,4 +380,14 @@ def build_both_side_fusion_features(
         "d_phys_real_pct": d_both_weighted_real_pct,
         "d_phys_abs_pct": d_both_mean_abs_pct,
         "d_phys_real_strategy": "both_weighted_real",
+        "d_takagi_local_pct": d_takagi_local_pct,
+        "d_takagi_remote_pct": d_takagi_remote_pct,
+        "d_takagi_remote_flipped_pct": d_takagi_remote_flipped_pct,
+        "d_takagi_both_mean_pct": d_takagi_both_mean_pct,
+        "d_takagi_both_diff_pct": d_takagi_both_diff_pct,
+        "d_takagi_both_disagreement_pct": d_takagi_both_disagreement_pct,
+        "takagi_valid_local": feat_local.get("takagi_valid", 0),
+        "takagi_valid_remote": feat_remote.get("takagi_valid", 0),
+        "takagi_reason_local": feat_local.get("takagi_reason", ""),
+        "takagi_reason_remote": feat_remote.get("takagi_reason", ""),
     }

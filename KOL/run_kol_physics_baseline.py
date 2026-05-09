@@ -139,6 +139,10 @@ def audit_case_and_formula_mapping(
 def main(config: MainConfig) -> None:
     print("Loading processed windows...")
     X, labels_df, meta = load_windowed_dataset(config)
+    print(
+        "DEBUG build_both_side_fusion_features loaded from:",
+        build_both_side_fusion_features.__code__.co_filename,
+    )
 
     include_groups = config.training.feature_groups_include
     materialize = config.training.materialize_feature_filters
@@ -357,36 +361,13 @@ def main(config: MainConfig) -> None:
                 "line_len_km": L_km,
                 "operator_side_mode": operator_side_mode,
                 "used_sides": " | ".join(used_sides),
-                "z_app_real": feat["z_app_real"],
-                "z_app_imag": feat["z_app_imag"],
-                "ratio_real": feat["ratio_real"],
-                "ratio_abs": feat["ratio_abs"],
-                "d_phys_raw_real_km": feat["d_phys_raw_real_km"],
-                "d_phys_clipped_real_km": feat["d_phys_clipped_real_km"],
-                "d_phys_real_pct": feat["d_phys_real_pct"],
-                "d_phys_raw_abs_km": feat["d_phys_raw_abs_km"],
-                "d_phys_clipped_abs_km": feat["d_phys_clipped_abs_km"],
-                "d_phys_abs_pct": feat["d_phys_abs_pct"],
-                "abs_V0": feat["abs_V0"],
-                "abs_V1": feat["abs_V1"],
-                "abs_V2": feat["abs_V2"],
-                "abs_I0": feat["abs_I0"],
-                "abs_I1": feat["abs_I1"],
-                "abs_I2": feat["abs_I2"],
-                "ratio_V0_V1": feat["ratio_V0_V1"],
-                "ratio_V2_V1": feat["ratio_V2_V1"],
-                "ratio_I0_I1": feat["ratio_I0_I1"],
-                "ratio_I2_I1": feat["ratio_I2_I1"],
-                "abs_Z0_app": feat["abs_Z0_app"],
-                "abs_Z1_app": feat["abs_Z1_app"],
-                "abs_Z2_app": feat["abs_Z2_app"],
-                "d_phys_raw_real_pct": feat["d_phys_raw_real_pct"],
-                "is_clipped_low_real": feat["is_clipped_low_real"],
-                "is_clipped_high_real": feat["is_clipped_high_real"],
-                "d_phys_raw_abs_pct": feat["d_phys_raw_abs_pct"],
-                "is_clipped_low_abs": feat["is_clipped_low_abs"],
-                "is_clipped_high_abs": feat["is_clipped_high_abs"],
             }
+
+            # Add every operator feature, including new Takagi columns.
+            # Do not overwrite metadata columns already set above.
+            for k, v in feat.items():
+                if k not in row_out:
+                    row_out[k] = v
             rows.append(row_out)
 
         elif operator_side_mode == "both":
@@ -460,31 +441,11 @@ def main(config: MainConfig) -> None:
                 "operator_side_mode": operator_side_mode,
                 "used_sides": " | ".join(used_local + used_remote),
 
-                "d_local_real_pct": fusion["d_local_real_pct"],
-                "d_remote_real_pct": fusion["d_remote_real_pct"],
-                "d_remote_real_flipped_pct": fusion["d_remote_real_flipped_pct"],
-                "d_both_mean_real_pct": fusion["d_both_mean_real_pct"],
-                "d_both_diff_real_pct": fusion["d_both_diff_real_pct"],
-
-                "d_local_abs_pct": fusion["d_local_abs_pct"],
-                "d_remote_abs_pct": fusion["d_remote_abs_pct"],
-                "d_remote_abs_flipped_pct": fusion["d_remote_abs_flipped_pct"],
-                "d_both_mean_abs_pct": fusion["d_both_mean_abs_pct"],
-                "d_both_diff_abs_pct": fusion["d_both_diff_abs_pct"],
-
-                "d_phys_real_pct": fusion["d_phys_real_pct"],
-                "d_phys_abs_pct": fusion["d_phys_abs_pct"],
-                "d_phys_real_strategy": "both_mean_real",
-
+                # local-side details
                 "z_app_local_real": feat_local["z_app_real"],
                 "z_app_local_imag": feat_local["z_app_imag"],
-                "z_app_remote_real": feat_remote["z_app_real"],
-                "z_app_remote_imag": feat_remote["z_app_imag"],
-
                 "ratio_real_local": feat_local["ratio_real"],
-                "ratio_real_remote": feat_remote["ratio_real"],
                 "ratio_abs_local": feat_local["ratio_abs"],
-                "ratio_abs_remote": feat_remote["ratio_abs"],
 
                 "abs_V0_local": feat_local["abs_V0"],
                 "abs_V1_local": feat_local["abs_V1"],
@@ -500,6 +461,12 @@ def main(config: MainConfig) -> None:
                 "abs_Z1_app_local": feat_local["abs_Z1_app"],
                 "abs_Z2_app_local": feat_local["abs_Z2_app"],
 
+                # remote-side details
+                "z_app_remote_real": feat_remote["z_app_real"],
+                "z_app_remote_imag": feat_remote["z_app_imag"],
+                "ratio_real_remote": feat_remote["ratio_real"],
+                "ratio_abs_remote": feat_remote["ratio_abs"],
+
                 "abs_V0_remote": feat_remote["abs_V0"],
                 "abs_V1_remote": feat_remote["abs_V1"],
                 "abs_V2_remote": feat_remote["abs_V2"],
@@ -514,26 +481,22 @@ def main(config: MainConfig) -> None:
                 "abs_Z1_app_remote": feat_remote["abs_Z1_app"],
                 "abs_Z2_app_remote": feat_remote["abs_Z2_app"],
 
-                "d_local_raw_real_pct": fusion["d_local_raw_real_pct"],
-                "d_remote_raw_real_pct": fusion["d_remote_raw_real_pct"],
-                "d_remote_raw_real_flipped_pct": fusion["d_remote_raw_real_flipped_pct"],
-
-                "is_local_clipped_low_real": feat_local["is_clipped_low_real"],
-                "is_local_clipped_high_real": feat_local["is_clipped_high_real"],
-                "is_remote_clipped_low_real": feat_remote["is_clipped_low_real"],
-                "is_remote_clipped_high_real": feat_remote["is_clipped_high_real"],
-
-                "d_both_min_real_pct": fusion["d_both_min_real_pct"],
-                "d_both_max_real_pct": fusion["d_both_max_real_pct"],
-                "d_both_disagreement_real_pct": fusion["d_both_disagreement_real_pct"],
-                "d_both_edge_gated_real_pct": fusion["d_both_edge_gated_real_pct"],
-                "d_both_weighted_real_pct": fusion["d_both_weighted_real_pct"],
-
-                "w_local_real": fusion["w_local_real"],
-                "w_remote_real": fusion["w_remote_real"],
-
-                "d_both_disagreement_abs_pct": fusion["d_both_disagreement_abs_pct"],
+                # optional single-side Takagi diagnostics too
+                "d_takagi_local_raw_pct": feat_local.get("d_takagi_pct", np.nan),
+                "d_takagi_remote_raw_pct": feat_remote.get("d_takagi_pct", np.nan),
+                "takagi_valid_local_raw": feat_local.get("takagi_valid", 0),
+                "takagi_valid_remote_raw": feat_remote.get("takagi_valid", 0),
+                "takagi_reason_local_raw": feat_local.get("takagi_reason", ""),
+                "takagi_reason_remote_raw": feat_remote.get("takagi_reason", ""),
             }
+
+            # Add all fused both-side features, including Takagi and future operator columns.
+            # This also correctly uses fusion["d_phys_real_strategy"] instead of hardcoding.
+            for k, v in fusion.items():
+                if k not in row_out:
+                    row_out[k] = v
+
+
             rows.append(row_out)
 
         else:
