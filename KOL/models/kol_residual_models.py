@@ -263,6 +263,12 @@ def apply_kol_prediction_rule(
     elif mode == "all_cases_add_050":
         pred = d_phys_prior + 0.50 * residual
 
+    elif mode == "bounded_add_030":
+        pred = d_phys_prior + 0.30 * torch.tanh(residual)
+
+    elif mode == "bounded_add_050":
+        pred = d_phys_prior + 0.50 * torch.tanh(residual)
+
     else:
         raise ValueError(
             f"Unknown KOL prediction mode '{mode}'. "
