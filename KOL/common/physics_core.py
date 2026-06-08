@@ -16,7 +16,7 @@ def k0_from_line(r1: float, x1: float, r0: float, x0: float) -> complex:
     z0 = complex(r0, x0)
     if abs(z1) < 1e-12:
         return 0j
-    return (z0 - z1) / z1
+    return (z0 - z1) / (z1)
 
 
 def k0_from_line_torch(
@@ -285,6 +285,129 @@ def compute_loop_phasors_for_case(
         return V_loop, I_loop, "loop_current_too_small"
 
     return V_loop, I_loop, "ok"
+
+
+def compute_modified_takagi_tf_only_from_window(
+    x_raw: np.ndarray,
+    fs: float,
+    f_nom: float,
+    r1: float,
+    x1: float,
+    r0: float,
+    x0: float,
+    case: str,
+    dt_start: float,
+    onset_idx_from_dt_start_fn,
+    Z0_src_near: complex,
+    Z0_src_far: complex,
+    m_for_angle_pct: float,
+    angle_sign: float = 1.0,
+) -> tuple[float, str]:
+    """
+    Modified Takagi-style SLG operator using graph-derived transformer/source
+    zero-sequence approximation.
+
+    This is intended for SLG ablation only.
+
+    Uses:
+        I_ref = 3I0 * exp(-jT)
+
+    where T is derived from the zero-sequence network angle.
+
+    Note:
+        Z0_src_near / Z0_src_far currently come from the transformer-only
+        fallback unless external-grid source parameters are available.
+    """
+    case = str(case).lower().strip()
+
+    if case not in {"slg_a", "slg_b", "slg_c"}:
+        return float("nan"), "not_slg"
+
+    if x_raw.shape[1] not in {6, 12}:
+        return float("nan"), f"unexpected_channel_count_{x_raw.shape[1]}"
+
+    if x_raw.shape[1] == 12:
+        x_raw = x_raw[:, :6]
+
+    spc = int(np.rint(fs / f_nom))
+    if spc <= 1:
+        return float("nan"), "invalid_spc"
+
+    onset_idx = onset_idx_from_dt_start_fn(dt_start, fs)
+
+    post_start = onset_idx
+    post_end = onset_idx + spc
+
+    if post_end > x_raw.shape[0]:
+        return float("nan"), "post_window_out_of_bounds"
+
+    Va = dft_phasor_1cycle(x_raw[post_start:post_end, 0])
+    Vb = dft_phasor_1cycle(x_raw[post_start:post_end, 1])
+    Vc = dft_phasor_1cycle(x_raw[post_start:post_end, 2])
+    Ia = dft_phasor_1cycle(x_raw[post_start:post_end, 3])
+    Ib = dft_phasor_1cycle(x_raw[post_start:post_end, 4])
+    Ic = dft_phasor_1cycle(x_raw[post_start:post_end, 5])
+
+    if case == "slg_a":
+        V_phase = Va
+        I_phase = Ia
+    elif case == "slg_b":
+        V_phase = Vb
+        I_phase = Ib
+    elif case == "slg_c":
+        V_phase = Vc
+        I_phase = Ic
+    else:
+        return float("nan"), "not_slg"
+
+    I0_res = Ia + Ib + Ic  # this is 3I0
+
+    z1 = complex(r1, x1)
+    z0 = complex(r0, x0)
+
+    if abs(z1) < 1e-12:
+        return float("nan"), "invalid_z1"
+
+    if abs(I0_res) < 1e-9:
+        return float("nan"), "zero_sequence_current_too_small"
+
+    # Keep your current working k0 convention.
+    k0 = k0_from_line(r1, x1, r0, x0)
+    I_loop = I_phase + k0 * I0_res
+
+    if abs(I_loop) < 1e-9:
+        return float("nan"), "loop_current_too_small"
+
+    if not np.isfinite(m_for_angle_pct):
+        return float("nan"), "invalid_m_for_angle"
+
+    m = float(np.clip(m_for_angle_pct / 100.0, 0.0, 1.0))
+
+    # Zero-sequence current distribution approximation.
+    Z0_far_path = Z0_src_far + (1.0 - m) * z0
+    Z0_total = Z0_src_near + z0 + Z0_src_far
+
+    if abs(Z0_total) < 1e-12:
+        return float("nan"), "invalid_z0_total"
+
+    current_distribution = Z0_far_path / Z0_total
+    T = angle_sign * np.angle(current_distribution)
+
+    I_ref = I0_res * np.exp(-1j * T)
+
+    numerator = np.imag(V_phase * np.conj(I_ref))
+    denominator = np.imag(z1 * I_loop * np.conj(I_ref))
+
+    if abs(denominator) < 1e-9:
+        return float("nan"), "mod_takagi_denominator_too_small"
+
+    d_pu = numerator / denominator
+    d_pct = 100.0 * float(d_pu)
+
+    if not np.isfinite(d_pct):
+        return float("nan"), "mod_takagi_not_finite"
+
+    return float(np.clip(d_pct, 0.0, 100.0)), "ok"
 
 
 def compute_takagi_distance_from_window(
