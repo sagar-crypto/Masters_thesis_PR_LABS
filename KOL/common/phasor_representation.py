@@ -199,3 +199,88 @@ def apply_input_representation(
         f"Unknown training.input_representation={input_representation!r}. "
         f"Supported: waveform, phasor_seq"
     )
+
+
+def build_waveform_phasor_dual_inputs(
+    *,
+    X_used_filtered: np.ndarray,
+    meta: dict,
+    feature_indices_for_ds,
+    config,
+    logger,
+) -> tuple[np.ndarray, np.ndarray, dict, None, list[str]]:
+    """
+    Builds dual inputs for the waveform+phasor model.
+
+    Returns:
+        X_waveform: original waveform input, materialized if feature_indices_for_ds was used
+        X_phasor: sliding phasor sequence built from the same selected waveform channels
+        meta: updated metadata for waveform features
+        feature_indices_for_ds: always None after materialization
+        phasor_feature_names: feature names for phasor branch
+    """
+    logger.info("Using input_representation=waveform_phasor_dual")
+
+    feature_names_full = list(meta["feature_names"])
+
+    if feature_indices_for_ds is not None:
+        feature_indices_list = list(feature_indices_for_ds)
+
+        logger.info(
+            "Materializing %d configured feature indices before dual representation.",
+            len(feature_indices_list),
+        )
+
+        X_waveform = X_used_filtered[:, :, feature_indices_list]
+        waveform_feature_names = [feature_names_full[i] for i in feature_indices_list]
+
+    else:
+        X_waveform = X_used_filtered
+        waveform_feature_names = feature_names_full
+
+        if len(waveform_feature_names) != X_waveform.shape[-1]:
+            logger.warning(
+                "feature_names length (%d) does not match waveform feature dimension (%d). "
+                "Using generic waveform feature names.",
+                len(waveform_feature_names),
+                X_waveform.shape[-1],
+            )
+            waveform_feature_names = [
+                f"feature_{i}" for i in range(X_waveform.shape[-1])
+            ]
+
+    T_full = X_waveform.shape[1]
+    window_s = float(config.window_extraction.window_length)
+    fs = T_full / window_s
+
+    phasor_step_samples = int(
+        getattr(config.training, "phasor_step_samples", 16)
+    )
+    phasor_mode = str(
+        getattr(config.training, "phasor_mode", "real_imag")
+    ).lower().strip()
+
+    logger.info("Dual waveform input shape: %s", X_waveform.shape)
+    logger.info(
+        "Building phasor branch with fs=%.3f Hz | step_samples=%d | mode=%s",
+        fs,
+        phasor_step_samples,
+        phasor_mode,
+    )
+
+    X_phasor, phasor_feature_names = build_sliding_phasor_sequence(
+        X=X_waveform,
+        feature_names=waveform_feature_names,
+        fs=fs,
+        f_nom=50.0,
+        step_samples=phasor_step_samples,
+        mode=phasor_mode,
+    )
+
+    logger.info("Dual phasor input shape: %s", X_phasor.shape)
+    logger.info("Number of waveform features: %d", X_waveform.shape[-1])
+    logger.info("Number of phasor features: %d", X_phasor.shape[-1])
+
+    meta["feature_names"] = waveform_feature_names
+
+    return X_waveform, X_phasor, meta, None, phasor_feature_names

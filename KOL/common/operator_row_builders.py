@@ -15,6 +15,7 @@ from KOL.common.operator_features import (
 from KOL.common.operator_modified_takagi import (
     add_empty_modified_takagi_columns,
     add_modified_takagi_columns,
+    select_modified_takagi_seed_pct
 )
 from KOL.common.windowing import onset_idx_from_dt_start
 
@@ -240,6 +241,13 @@ def build_both_side_operator_row(
     }
 
     if case in {"slg_a", "slg_b", "slg_c"}:
+        m_local_seed_pct, m_local_seed_source = select_modified_takagi_seed_pct(
+            feat_local
+        )
+        m_remote_seed_pct, m_remote_seed_source = select_modified_takagi_seed_pct(
+            feat_remote
+        )
+
         add_modified_takagi_columns(
             row_out=row_out,
             row=row,
@@ -252,7 +260,10 @@ def build_both_side_operator_row(
             r0=r0,
             x0=x0,
             case=case,
-            y_col=y_col,
+            m_local_seed_pct=m_local_seed_pct,
+            m_remote_seed_pct=m_remote_seed_pct,
+            m_local_seed_source=m_local_seed_source,
+            m_remote_seed_source=m_remote_seed_source,
             Z0_src_local=Z0_src_local,
             Z0_src_remote=Z0_src_remote,
         )

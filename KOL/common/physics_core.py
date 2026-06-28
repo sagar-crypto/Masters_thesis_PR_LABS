@@ -302,6 +302,7 @@ def compute_modified_takagi_tf_only_from_window(
     Z0_src_far: complex,
     m_for_angle_pct: float,
     angle_sign: float = 1.0,
+    clip_output=True,
 ) -> tuple[float, str]:
     """
     Modified Takagi-style SLG operator using graph-derived transformer/source
@@ -402,12 +403,15 @@ def compute_modified_takagi_tf_only_from_window(
         return float("nan"), "mod_takagi_denominator_too_small"
 
     d_pu = numerator / denominator
-    d_pct = 100.0 * float(d_pu)
+    d_raw_pct = 100.0 * (d_pu)
 
-    if not np.isfinite(d_pct):
-        return float("nan"), "mod_takagi_not_finite"
+    if not np.isfinite(d_raw_pct):
+        return np.nan, "nonfinite_distance"
 
-    return float(np.clip(d_pct, 0.0, 100.0)), "ok"
+    if clip_output:
+        return float(np.clip(d_raw_pct, 0.0, 100.0)), "ok"
+
+    return float(d_raw_pct), "ok"
 
 
 def compute_takagi_distance_from_window(
