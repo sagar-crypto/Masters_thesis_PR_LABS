@@ -19,6 +19,103 @@ def k0_from_line(r1: float, x1: float, r0: float, x0: float) -> complex:
     return (z0 - z1) / (z1)
 
 
+def compute_two_ended_posseq_distance_pct(
+    x_vi_local: np.ndarray,
+    x_vi_remote: np.ndarray,
+    fs: float,
+    f_nom: float,
+    r1: float,
+    x1: float,
+    current_sign: int = 1,
+    min_current_ratio: float = 1e-2,
+) -> tuple[float, str]:
+    """
+    Synchronized two-ended positive-sequence fault-location estimate.
+
+    Expected input order per terminal:
+        [Va, Vb, Vc, Ia, Ib, Ic]
+
+    Uses the last full cycle of the selected window, matching the
+    supervisor's implementation. r1 and x1 are the total impedance
+    of the complete protected line in this repository.
+
+    Returns distance in percent from the default/local terminal.
+    No clipping is applied.
+    """
+    if (
+        x_vi_local.ndim != 2
+        or x_vi_remote.ndim != 2
+        or x_vi_local.shape[1] != 6
+        or x_vi_remote.shape[1] != 6
+    ):
+        return np.nan, "expected_two_Tx6_inputs"
+
+    spc = int(np.rint(fs / f_nom))
+
+    if spc <= 1:
+        return np.nan, "invalid_samples_per_cycle"
+
+    if x_vi_local.shape[0] < spc or x_vi_remote.shape[0] < spc:
+        return np.nan, "window_shorter_than_one_cycle"
+
+    def positive_sequence_vi(x_vi: np.ndarray) -> tuple[complex, complex]:
+        cycle = x_vi[-spc:, :]
+
+        va = dft_phasor_1cycle(cycle[:, 0])
+        vb = dft_phasor_1cycle(cycle[:, 1])
+        vc = dft_phasor_1cycle(cycle[:, 2])
+
+        ia = dft_phasor_1cycle(cycle[:, 3])
+        ib = dft_phasor_1cycle(cycle[:, 4])
+        ic = dft_phasor_1cycle(cycle[:, 5])
+
+        return (
+            symm_pos_seq(va, vb, vc),
+            symm_pos_seq(ia, ib, ic),
+        )
+
+    v_local, i_local = positive_sequence_vi(x_vi_local)
+    v_remote, i_remote = positive_sequence_vi(x_vi_remote)
+
+    if not all(
+        np.isfinite(value)
+        for value in (
+            v_local.real, v_local.imag,
+            i_local.real, i_local.imag,
+            v_remote.real, v_remote.imag,
+            i_remote.real, i_remote.imag,
+        )
+    ):
+        return np.nan, "nonfinite_positive_sequence_phasor"
+
+    z1_total = complex(r1, x1)
+
+    if abs(z1_total) < 1e-12:
+        return np.nan, "invalid_z1_total"
+
+    i_local = int(current_sign) * i_local
+    i_remote = int(current_sign) * i_remote
+
+    denominator_current = i_local + i_remote
+    current_scale = max(abs(i_local), abs(i_remote), 1e-30)
+
+    if abs(denominator_current) < min_current_ratio * current_scale:
+        return np.nan, "degenerate_current_denominator"
+
+    distance_pu = (
+        v_local - v_remote + z1_total * i_remote
+    ) / (
+        z1_total * denominator_current
+    )
+
+    distance_pct = 100.0 * float(np.real(distance_pu))
+
+    if not np.isfinite(distance_pct):
+        return np.nan, "nonfinite_distance"
+
+    return distance_pct, "ok"
+
+
 def k0_from_line_torch(
     r1: torch.Tensor,
     x1: torch.Tensor,
@@ -144,7 +241,7 @@ def compute_zapp_from_window(
 
     eps = 1e-9
     i0_po = Ia_po + Ib_po + Ic_po
-    k0 = k0_from_line(r1, x1, r0, x0)
+    k0 = k0_from_line(r1, x1, r0, x0)/3.0
 
     if case == "3ph":
         v1_po = symm_pos_seq(Va_po, Vb_po, Vc_po)
@@ -236,7 +333,7 @@ def compute_loop_phasors_for_case(
     case = str(case).lower().strip()
 
     i0_res = Ia + Ib + Ic
-    k0 = k0_from_line(r1, x1, r0, x0)
+    k0 = k0_from_line(r1, x1, r0, x0)/3.0
 
     if case == "3ph":
         V_loop = symm_pos_seq(Va, Vb, Vc)
@@ -373,7 +470,7 @@ def compute_modified_takagi_tf_only_from_window(
         return float("nan"), "zero_sequence_current_too_small"
 
     # Keep your current working k0 convention.
-    k0 = k0_from_line(r1, x1, r0, x0)
+    k0 = k0_from_line(r1, x1, r0, x0)/3.0
     I_loop = I_phase + k0 * I0_res
 
     if abs(I_loop) < 1e-9:
