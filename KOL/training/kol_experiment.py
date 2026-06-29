@@ -23,7 +23,7 @@ from KOL.common.cv_utils import (
     setup_wandb_logging,
 )
 from KOL.common.operator_features import load_operator_inputs_if_enabled
-from KOL.common.phasor_representation import apply_input_representation
+from KOL.common.phasor_representation import apply_input_representation, build_waveform_phasor_dual_inputs
 from KOL.common.windowing import get_kol_mode
 from KOL.datasets.kol_data_preparation import load_filtered_training_data
 from KOL.training.kol_fold_runner import run_one_fold
@@ -185,13 +185,35 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
     use_ops = prepared.use_ops
     kol_window_mode = prepared.kol_window_mode
 
-    X_used_filtered, meta, feature_indices_for_ds = apply_input_representation(
-        X_used_filtered=X_used_filtered,
-        meta=meta,
-        feature_indices_for_ds=feature_indices_for_ds,
-        config=config,
-        logger=logger,
-    )
+    input_representation = str(
+        getattr(config.training, "input_representation", "waveform")
+    ).lower().strip()
+
+    X_phasor_all = None
+    phasor_feature_names = None
+
+    if input_representation == "waveform_phasor_dual":
+        (
+            X_used_filtered,
+            X_phasor_all,
+            meta,
+            feature_indices_for_ds,
+            phasor_feature_names,
+        ) = build_waveform_phasor_dual_inputs(
+            X_used_filtered=X_used_filtered,
+            meta=meta,
+            feature_indices_for_ds=feature_indices_for_ds,
+            config=config,
+            logger=logger,
+        )
+    else:
+        X_used_filtered, meta, feature_indices_for_ds = apply_input_representation(
+            X_used_filtered=X_used_filtered,
+            meta=meta,
+            feature_indices_for_ds=feature_indices_for_ds,
+            config=config,
+            logger=logger,
+        )
 
     groups_used = labels_df_used[L.SAMPLE_ID]
 
@@ -225,6 +247,19 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         out_dim = 1
 
     T, F_eff, flat_dim = infer_input_dims(X_used_filtered, feature_indices_for_ds)
+    if X_phasor_all is not None:
+        T_phasor = int(X_phasor_all.shape[1])
+        F_phasor = int(X_phasor_all.shape[2])
+        logger.info(
+            "Dual-input dimensions | waveform=(T=%d, F=%d) | phasor=(T=%d, F=%d)",
+            int(X_used_filtered.shape[1]),
+            int(X_used_filtered.shape[2]),
+            T_phasor,
+            F_phasor,
+        )
+    else:
+        T_phasor = None
+        F_phasor = None
 
     model_name = str(config.model.model_name)
     kol_mode = get_kol_mode(config) if d_phys_prior is not None else None
@@ -387,6 +422,8 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
             eval_only=bool(eval_only),
             resave_eval_only=bool(resave_eval_only),
             logger=logger,
+            X_phasor_all=X_phasor_all,
+            n_phasor_features=F_phasor,
         )
         all_fold_metrics.append(metrics_row)
 

@@ -130,7 +130,10 @@ def export_operator_features(config: MainConfig) -> pd.DataFrame:
 
     rows: list[dict[str, Any]] = []
     reason_counts: Counter = Counter()
-    takagi_imp_bank = load_takagi_impedance_bank(GRAPH_PATH)
+    takagi_imp_bank = None
+
+    if topology == "hv_double_line_110kv":
+        takagi_imp_bank = load_takagi_impedance_bank(GRAPH_PATH)
 
     for i in range(len(df)):
         row = cast(pd.Series, df.iloc[i])

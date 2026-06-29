@@ -15,8 +15,10 @@ from KOL.common.operator_features import (
 from KOL.common.operator_modified_takagi import (
     add_empty_modified_takagi_columns,
     add_modified_takagi_columns,
+    select_modified_takagi_seed_pct
 )
 from KOL.common.windowing import onset_idx_from_dt_start
+from KOL.common.physics_core import compute_two_ended_posseq_distance_pct
 
 
 def build_single_side_operator_row(
@@ -102,7 +104,7 @@ def build_both_side_operator_row(
     fs: float,
     f_nom: float,
     y_col: str,
-    takagi_imp_bank: dict[str, dict[str, complex]],
+    takagi_imp_bank: dict[str, dict[str, complex]] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     case = derive_fault_case_from_processed_labels(row)
     if case == "invalid":
@@ -159,6 +161,29 @@ def build_both_side_operator_row(
         dt_start=float(row["dt_start"]),
         onset_idx_from_dt_start_fn=onset_idx_from_dt_start,
     )
+    d_two_ended_plus_pct, two_ended_plus_reason = (
+        compute_two_ended_posseq_distance_pct(
+            x_vi_local=x_vi_local,
+            x_vi_remote=x_vi_remote,
+            fs=fs,
+            f_nom=float(f_nom),
+            r1=r1,
+            x1=x1,
+            current_sign=+1,
+        )
+    )
+
+    d_two_ended_minus_pct, two_ended_minus_reason = (
+        compute_two_ended_posseq_distance_pct(
+            x_vi_local=x_vi_local,
+            x_vi_remote=x_vi_remote,
+            fs=fs,
+            f_nom=float(f_nom),
+            r1=r1,
+            x1=x1,
+            current_sign=-1,
+        )
+    )
 
     if feat_local["reason"] != "ok":
         return None, f"local_{feat_local['reason']}"
@@ -168,11 +193,6 @@ def build_both_side_operator_row(
 
     fusion = build_both_side_fusion_features(feat_local, feat_remote)
 
-    fault_line = str(row["y_fault_line"])
-    imp = takagi_imp_bank[fault_line]
-
-    Z0_src_local = imp["Z0_src_local"]
-    Z0_src_remote = imp["Z0_src_remote"]
 
     row_out: dict[str, Any] = {
         "sample_id": row["sample_id"],
@@ -237,9 +257,30 @@ def build_both_side_operator_row(
         "takagi_valid_remote_raw": feat_remote.get("takagi_valid", 0),
         "takagi_reason_local_raw": feat_local.get("takagi_reason", ""),
         "takagi_reason_remote_raw": feat_remote.get("takagi_reason", ""),
+        "d_two_ended_posseq_plus_pct": d_two_ended_plus_pct,
+        "d_two_ended_posseq_minus_pct": d_two_ended_minus_pct,
+        "two_ended_posseq_plus_reason": two_ended_plus_reason,
+        "two_ended_posseq_minus_reason": two_ended_minus_reason,
     }
 
-    if case in {"slg_a", "slg_b", "slg_c"}:
+    if (
+        topology == "hv_double_line_110kv"
+        and case in {"slg_a", "slg_b", "slg_c"}
+        and takagi_imp_bank is not None
+        and str(row["y_fault_line"]) in takagi_imp_bank
+    ):
+        imp = takagi_imp_bank[str(row["y_fault_line"])]
+
+        Z0_src_local = imp["Z0_src_local"]
+        Z0_src_remote = imp["Z0_src_remote"]
+
+        m_local_seed_pct, m_local_seed_source = select_modified_takagi_seed_pct(
+            feat_local
+        )
+        m_remote_seed_pct, m_remote_seed_source = select_modified_takagi_seed_pct(
+            feat_remote
+        )
+
         add_modified_takagi_columns(
             row_out=row_out,
             row=row,
@@ -252,7 +293,10 @@ def build_both_side_operator_row(
             r0=r0,
             x0=x0,
             case=case,
-            y_col=y_col,
+            m_local_seed_pct=m_local_seed_pct,
+            m_remote_seed_pct=m_remote_seed_pct,
+            m_local_seed_source=m_local_seed_source,
+            m_remote_seed_source=m_remote_seed_source,
             Z0_src_local=Z0_src_local,
             Z0_src_remote=Z0_src_remote,
         )

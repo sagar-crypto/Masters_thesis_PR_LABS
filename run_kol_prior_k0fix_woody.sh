@@ -32,8 +32,8 @@ conda activate Masters_thesis_env_py312
 # USER SETTINGS ONLY
 # ============================================================
 
-TOPOLOGY="hv_double_line_110kv"
-TOPOLOGY_CONFIG="hv_double_line_110kv"
+TOPOLOGY="hv_double_line_90kv"
+TOPOLOGY_CONFIG="hv_double_line_90kv"
 
 WINDOW_LENGTH="0p060"
 W_FLOAT="${WINDOW_LENGTH/p/.}"

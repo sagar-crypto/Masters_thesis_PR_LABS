@@ -23,8 +23,8 @@ from KOL.common.cv_utils import (
     split_train_val_from_train_pool,
     validate_checkpoint_metadata,
 )
-from KOL.datasets.kol_datasets import make_kol_loaders
-from KOL.models.kol_residual_models import KOLGRUCaseResidualRegressor
+from KOL.datasets.kol_datasets import make_kol_loaders, make_kol_dual_loaders
+from KOL.models.kol_residual_models import KOLGRUCaseResidualRegressor, KOLDualGRUCaseResidualRegressor
 from KOL.training.kol_residual_train import (
     evaluate_kol_case_k0,
     train_kol_case_k0,
@@ -230,6 +230,8 @@ def run_one_fold(
     eval_only: bool,
     resave_eval_only: bool,
     logger,
+    X_phasor_all: np.ndarray | None = None,
+    n_phasor_features: int | None = None,
 ) -> dict[str, Any]:
     train_pool_idx = np.asarray(train_pool_idx, dtype=int)
     test_idx = np.asarray(test_idx, dtype=int)
@@ -359,35 +361,66 @@ def run_one_fold(
                 "First KOL residual version currently supports regression only."
             )
 
-        train_loader, val_loader, test_loader = make_kol_loaders(
-            X_used=X_used_filtered,
-            y_all=y_all,
-            d_phys_prior=d_phys_prior,
-            case_idx=case_idx,
-            op_features=op_features,
-            idx_train=idx_train,
-            idx_val=idx_val,
-            idx_test=test_idx,
-            feature_indices_for_ds=feature_indices_for_ds,
-            batch_size=int(config.training.batch_size),
-            num_workers=int(config.training.num_workers),
-            pin_memory=bool(config.training.pin_memory),
-        )
+        if X_phasor_all is not None:
+            train_loader, val_loader, test_loader = make_kol_dual_loaders(
+                X_waveform=X_used_filtered,
+                X_phasor=X_phasor_all,
+                y_all=y_all,
+                d_phys_prior=d_phys_prior,
+                case_idx=case_idx,
+                op_features=op_features,
+                idx_train=idx_train,
+                idx_val=idx_val,
+                idx_test=test_idx,
+                batch_size=int(config.training.batch_size),
+                num_workers=int(config.training.num_workers),
+                pin_memory=bool(config.training.pin_memory),
+            )
+        else:
+            train_loader, val_loader, test_loader = make_kol_loaders(
+                X_used=X_used_filtered,
+                y_all=y_all,
+                d_phys_prior=d_phys_prior,
+                case_idx=case_idx,
+                op_features=op_features,
+                idx_train=idx_train,
+                idx_val=idx_val,
+                idx_test=test_idx,
+                feature_indices_for_ds=feature_indices_for_ds,
+                batch_size=int(config.training.batch_size),
+                num_workers=int(config.training.num_workers),
+                pin_memory=bool(config.training.pin_memory),
+            )
 
         logger.info("op_features is None: %s", op_features is None)
         if op_features is not None:
             logger.info("op_features shape: %s", op_features.shape)
             logger.info("n_op_features passed to model: %d", int(op_features.shape[1]))
 
-        model = KOLGRUCaseResidualRegressor(
-            n_features=int(F_eff),
-            n_op_features=0 if op_features is None else int(op_features.shape[1]),
-            hidden_size=int(getattr(config.model, "hidden_size", 128)),
-            num_layers=int(getattr(config.model, "num_layers", 2)),
-            dropout=float(getattr(config.model, "dropout", 0.1)),
-            bidirectional=bool(getattr(config.model, "bidirectional", False)),
-            n_cases=len(CASE_TO_IDX),
-        ).to(device)
+        if X_phasor_all is not None:
+            if n_phasor_features is None:
+                raise ValueError("n_phasor_features is required for dual-input model.")
+
+            model = KOLDualGRUCaseResidualRegressor(
+                n_waveform_features=int(F_eff),
+                n_phasor_features=int(n_phasor_features),
+                n_op_features=0 if op_features is None else int(op_features.shape[1]),
+                hidden_size=int(getattr(config.model, "hidden_size", 128)),
+                num_layers=int(getattr(config.model, "num_layers", 2)),
+                dropout=float(getattr(config.model, "dropout", 0.1)),
+                bidirectional=bool(getattr(config.model, "bidirectional", False)),
+                n_cases=len(CASE_TO_IDX),
+            ).to(device)
+        else:
+            model = KOLGRUCaseResidualRegressor(
+                n_features=int(F_eff),
+                n_op_features=0 if op_features is None else int(op_features.shape[1]),
+                hidden_size=int(getattr(config.model, "hidden_size", 128)),
+                num_layers=int(getattr(config.model, "num_layers", 2)),
+                dropout=float(getattr(config.model, "dropout", 0.1)),
+                bidirectional=bool(getattr(config.model, "bidirectional", False)),
+                n_cases=len(CASE_TO_IDX),
+            ).to(device)
 
         optimizer = torch.optim.AdamW(
             model.parameters(),
