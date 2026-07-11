@@ -17,6 +17,7 @@ from KOL.common.operator_data_prep import (
 from KOL.common.operator_row_builders import (
     build_both_side_operator_row,
     build_single_side_operator_row,
+    build_two_ended_posseq_operator_row
 )
 from KOL.common.takagi_graph_impedances import load_takagi_impedance_bank
 
@@ -62,17 +63,16 @@ def print_and_save_operator_features(
 
     print("\nOperator feature preview:")
 
-    preview_cols = [
+    preview_candidates = [
         "sample_id",
         "window_idx",
         "y_fault_line",
         "y_fault_location",
         "case",
+        "d_two_ended_posseq_plus_pct",
+        "two_ended_posseq_plus_reason",
         "d_phys_real_pct",
         "d_phys_abs_pct",
-    ]
-
-    extra_candidates = [
         "ratio_real",
         "ratio_abs",
         "ratio_V2_V1",
@@ -87,12 +87,17 @@ def print_and_save_operator_features(
         "d_phys_real_strategy",
     ]
 
-    preview_cols.extend([c for c in extra_candidates if c in feat_df.columns])
+    preview_cols = [c for c in preview_candidates if c in feat_df.columns]
 
     print(feat_df[preview_cols].head(10).to_string(index=False))
 
+    unique_lines = sorted(feat_df["y_fault_line"].astype(str).unique())
+
+    line_tag = unique_lines[0] if len(unique_lines) == 1 else "all_lines"
+    line_tag = line_tag.replace("/", "_").replace(" ", "_")
+
     experiment_tag = (
-        f"{topology}_{operator_side_mode}_{operator_window_mode}_mod_takagi_tf_only"
+        f"{topology}_{line_tag}_{operator_side_mode}_{operator_window_mode}"
     )
     out_path = f"/home/vault/iwi5/iwi5305h/kol_operator_features_{experiment_tag}.csv"
 
@@ -117,14 +122,17 @@ def export_operator_features(config: MainConfig) -> pd.DataFrame:
 
     feature_names = list(meta["feature_names"])
 
-    run_formula_audit(
-        df=df,
-        feature_names=feature_names,
-    )
-
     operator_side_mode = str(
         getattr(config.training, "operator_side_mode", "default")
     ).lower().strip()
+
+    # The final two-ended export must not run the historical
+    # one-ended / Takagi formula audit.
+    if operator_side_mode != "two_ended_posseq":
+        run_formula_audit(
+            df=df,
+            feature_names=feature_names,
+        )
 
     print(f"Operator side mode: {operator_side_mode}")
 
@@ -132,7 +140,7 @@ def export_operator_features(config: MainConfig) -> pd.DataFrame:
     reason_counts: Counter = Counter()
     takagi_imp_bank = None
 
-    if topology == "hv_double_line_110kv":
+    if topology == "hv_double_line_110kv" and operator_side_mode == "both":
         takagi_imp_bank = load_takagi_impedance_bank(GRAPH_PATH)
 
     for i in range(len(df)):
@@ -161,6 +169,17 @@ def export_operator_features(config: MainConfig) -> pd.DataFrame:
                 f_nom=f_nom,
                 y_col=y_col,
                 takagi_imp_bank=takagi_imp_bank,
+            )
+
+        elif operator_side_mode == "two_ended_posseq":
+            row_out, reason = build_two_ended_posseq_operator_row(
+                row=row,
+                x_raw_full=x_raw_full,
+                feature_names=feature_names,
+                topology=topology,
+                fs=fs,
+                f_nom=f_nom,
+                y_col=y_col,
             )
 
         else:

@@ -492,3 +492,92 @@ def apply_kol_prediction_rule(
     )
 
     return torch.clamp(pred, 0.0, 1.0)
+
+
+
+class KOLGRULearnedFusionRegressor(nn.Module):
+    """Waveform GRU with a direct distance head and learned physics fusion.
+
+    The model predicts a direct waveform-based distance estimate d_gru and
+    combines it with the known two-ended physics prior:
+
+        d_kol = alpha * d_phys + (1 - alpha) * d_gru.
+
+    Both d_gru and d_kol are constrained to the normalized valid distance
+    interval [0, 1].  The fusion gate is initialized neutrally at alpha=0.5.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_features: int,
+        hidden_size: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        bidirectional: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.bidirectional = bool(bidirectional)
+        self.num_dirs = 2 if self.bidirectional else 1
+
+        self.gru = nn.GRU(
+            input_size=int(n_features),
+            hidden_size=int(hidden_size),
+            num_layers=int(num_layers),
+            dropout=float(dropout) if int(num_layers) > 1 else 0.0,
+            batch_first=True,
+            bidirectional=self.bidirectional,
+        )
+
+        h_dim = int(hidden_size) * self.num_dirs
+
+        # Direct waveform-only distance estimate.
+        self.direct_gru_head = nn.Linear(h_dim, 1)
+
+        # Event-specific fusion gate using waveform representation and d_phys.
+        self.alpha_head = nn.Linear(h_dim + 3, 1)
+
+        # Start from alpha = sigmoid(0) = 0.5 for every event.
+        # This prevents the model from initially collapsing to physics-only.
+        nn.init.zeros_(self.alpha_head.weight)
+        nn.init.zeros_(self.alpha_head.bias)
+
+    def forward(
+        self,
+        x_seq: torch.Tensor,
+        d_phys_prior: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        out, _ = self.gru(x_seq)
+        h = out[:, -1, :]
+
+        # Target locations are normalized to [0, 1], so keep the direct
+        # waveform estimate in the same physically valid interval.
+        d_gru = torch.sigmoid(
+            self.direct_gru_head(h)
+        ).squeeze(-1)
+
+        prior_gru_gap = torch.abs(
+            d_phys_prior - d_gru
+        )
+
+        alpha_input = torch.cat(
+            [
+                h,
+                d_phys_prior.unsqueeze(1),
+                d_gru.unsqueeze(1),
+                prior_gru_gap.unsqueeze(1),
+            ],
+            dim=1,
+        )
+
+        alpha = torch.sigmoid(
+            self.alpha_head(alpha_input)
+        ).squeeze(-1)
+
+        d_kol = (
+            alpha * d_phys_prior
+            + (1.0 - alpha) * d_gru
+        )
+
+        return d_kol, d_gru, alpha
