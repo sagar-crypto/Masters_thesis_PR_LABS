@@ -91,10 +91,26 @@ def _prepare_kol_inputs(
 
     kol_prediction_mode = get_kol_mode(config)
 
-    logger.info("KOL prediction mode: %s", kol_prediction_mode)
+    kol_model_mode = str(
+        getattr(config.training, "kol_model_mode", "legacy_residual")
+    ).lower().strip()
+
+    logger.info("KOL model mode: %s", kol_model_mode)
+    logger.info(
+        "KOL prediction mode: %s",
+        kol_prediction_mode,
+    )
     logger.info("Selected operator feature columns: %s", operator_feature_cols)
 
-    return labels_df_used, d_phys_prior, op_features, operator_feature_cols, case_idx, kol_prediction_mode
+    return (
+        labels_df_used,
+        d_phys_prior,
+        op_features,
+        operator_feature_cols,
+        case_idx,
+        kol_prediction_mode,
+        kol_model_mode,
+    )
 
 
 def _make_run_output_dir(
@@ -112,9 +128,24 @@ def _make_run_output_dir(
     else:
         default_line_filter = "all_lines"
 
-    line_filter = str(getattr(config.training, "line_filter", default_line_filter))
-    kol_mode_name = str(getattr(config.training, "kol_prediction_mode", "plain"))
-    window_mode_name = str(getattr(config.training, "kol_window_mode", "default"))
+    line_filter = str(
+        getattr(config.training, "line_filter", default_line_filter)
+    )
+
+    kol_model_mode = str(
+        getattr(config.training, "kol_model_mode", "legacy_residual")
+    ).lower().strip()
+
+    if kol_model_mode == "legacy_residual":
+        kol_mode_name = str(
+            getattr(config.training, "kol_prediction_mode", "plain")
+        )
+    else:
+        kol_mode_name = kol_model_mode
+
+    window_mode_name = str(
+        getattr(config.training, "kol_window_mode", "default")
+    )
     operator_path = str(getattr(config.training, "operator_features_path", "no_operator_file"))
 
     operator_tag = os.path.splitext(os.path.basename(operator_path))[0]
@@ -224,6 +255,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         operator_feature_cols,
         case_idx,
         kol_prediction_mode,
+        kol_model_mode,
     ) = _prepare_kol_inputs(
         config=config,
         labels_df_used=labels_df_used,
@@ -231,7 +263,17 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
     )
 
     logger.info("KOL window mode: %s", kol_window_mode if use_ops else "n/a")
-
+    if kol_model_mode in {
+        "gru_only",
+        "learned_fusion",
+        "bounded_residual_fusion",
+    }:
+        if d_phys_prior is None:
+            raise ValueError(
+                "The GRU fusion pipelines require "
+                "training.use_operator_features=true and a valid "
+                "physics-prior CSV."
+            )
     y_all, class_to_idx = _prepare_targets(
         labels_df_used=labels_df_used,
         target_label=target_label,
@@ -261,11 +303,31 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         T_phasor = None
         F_phasor = None
 
-    model_name = str(config.model.model_name)
+    base_model_name = str(config.model.model_name)
     kol_mode = get_kol_mode(config) if d_phys_prior is not None else None
 
+    model_name = base_model_name
+
     if d_phys_prior is not None:
-        model_name = f"kol_{kol_mode}_{model_name}"
+        if kol_model_mode == "legacy_residual":
+            model_name = f"kol_{kol_mode}_{base_model_name}"
+
+        elif kol_model_mode in {
+            "gru_only",
+            "learned_fusion",
+            "bounded_residual_fusion",
+        }:
+            model_name = (
+                f"kol_{kol_model_mode}_{base_model_name}"
+            )
+
+        else:
+            raise ValueError(
+                "Unknown training.kol_model_mode="
+                f"'{kol_model_mode}'. Supported values are: "
+                "legacy_residual, gru_only, learned_fusion, "
+                "bounded_residual_fusion."
+            )
 
     window_s = float(config.window_extraction.window_length)
     window_ms = int(round(1000.0 * window_s))
@@ -359,7 +421,11 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         criterion=spec.criterion,
         primary_name=spec.primary_metric,
         higher_is_better=spec.higher_is_better,
-        valid_row_idx=valid_row_idx,
+        # X_used_filtered and y_all are already compacted to the
+        # selected KOL rows. The tuning utility therefore needs indices
+        # relative to this compact dataset, not valid_row_idx from the
+        # original unfiltered waveform bank.
+        valid_row_idx=np.arange(len(y_all), dtype=np.int64),
         labels_df_used=labels_df_used,
         y_all=y_all,
         out_dim=out_dim,
@@ -404,6 +470,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
             case_idx=case_idx,
             op_features=op_features,
             kol_prediction_mode=kol_prediction_mode,
+            kol_model_mode=kol_model_mode,
             model_name=model_name,
             F_eff=F_eff,
             flat_dim=flat_dim,

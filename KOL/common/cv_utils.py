@@ -120,21 +120,26 @@ def build_cv_splits_stratified(
         )
 
     if cv_mode == "stratified_location":
-        if stratify_col not in labels_df.columns:
-            raise ValueError(
-                f"labels_df does not contain stratify_col='{stratify_col}'. "
-                f"Available columns: {list(labels_df.columns)}"
-            )
-
-        y_strat = labels_df[stratify_col].astype(str).to_numpy()
+        y_strat = _make_valid_location_strata(
+            labels_df=labels_df,
+            groups_np=groups_np,
+            stratify_col=stratify_col,
+            n_splits=n_splits,
+        )
 
         splitter = StratifiedGroupKFold(
             n_splits=n_splits,
             shuffle=True,
             random_state=seed,
         )
-        return list(splitter.split(np.zeros(len(y_all)), y_strat, groups_np))
 
+        return list(
+            splitter.split(
+                np.zeros(len(y_all)),
+                y_strat,
+                groups_np,
+            )
+        )
     if cv_mode == "stratified_case":
         if "case" not in labels_df.columns:
             raise ValueError("labels_df must contain 'case' for cv_mode='stratified_case'.")
@@ -328,3 +333,146 @@ def validate_checkpoint_metadata(
 
     if mismatches:
         logger.warning("Checkpoint metadata mismatch detected:\n  %s", "\n  ".join(mismatches))
+
+def _make_valid_location_strata(
+    *,
+    labels_df: pd.DataFrame,
+    groups_np: np.ndarray,
+    stratify_col: str,
+    n_splits: int,
+    max_bins: int = 10,
+) -> np.ndarray:
+    """
+    Create valid labels for StratifiedGroupKFold.
+
+    First try exact fault-location values. If an exact location has fewer
+    than n_splits event groups, fall back to deterministic quantile bins
+    of the event-level fault locations.
+    """
+    if stratify_col not in labels_df.columns:
+        raise ValueError(
+            f"labels_df does not contain stratify_col='{stratify_col}'. "
+            f"Available columns: {list(labels_df.columns)}"
+        )
+
+    if len(labels_df) != len(groups_np):
+        raise ValueError(
+            "labels_df and groups_np must have the same length."
+        )
+
+    work = pd.DataFrame(
+        {
+            "group": np.asarray(groups_np),
+            "location": pd.to_numeric(
+                labels_df[stratify_col],
+                errors="coerce",
+            ),
+        }
+    )
+
+    if not np.isfinite(work["location"].to_numpy()).all():
+        raise ValueError(
+            f"Column '{stratify_col}' contains non-finite values."
+        )
+
+    # Every event/sample_id must correspond to one true fault location.
+    locations_per_group = (
+        work.groupby("group", sort=False)["location"]
+        .nunique(dropna=False)
+    )
+
+    invalid_groups = locations_per_group[
+        locations_per_group > 1
+    ]
+
+    if not invalid_groups.empty:
+        raise ValueError(
+            f"Some event groups have multiple '{stratify_col}' values. "
+            f"Examples: {invalid_groups.head(10).to_dict()}"
+        )
+
+    # One location per event/sample_id.
+    group_locations = (
+        work.drop_duplicates(subset="group", keep="first")
+        .set_index("group")["location"]
+    )
+
+    # First preserve the original exact-location behavior whenever possible.
+    exact_labels = group_locations.astype(str)
+    exact_counts = exact_labels.value_counts()
+    min_exact_count = int(exact_counts.min())
+
+    if min_exact_count >= int(n_splits):
+        group_to_stratum = exact_labels
+
+        y_strat = pd.Series(groups_np).map(group_to_stratum)
+
+        if y_strat.isna().any():
+            raise RuntimeError(
+                "Could not map exact location strata back to all rows."
+            )
+
+        print(
+            f"CV stratification: using exact '{stratify_col}' values. "
+            f"Minimum groups per location: {min_exact_count}."
+        )
+
+        return y_strat.astype(str).to_numpy()
+
+    # Exact locations are too sparse. Create deterministic quantile bins.
+    n_groups = int(len(group_locations))
+
+    max_possible_bins = min(
+        int(max_bins),
+        int(n_groups // int(n_splits)),
+    )
+
+    for n_bins in range(max_possible_bins, 1, -1):
+        try:
+            group_bins = pd.qcut(
+                group_locations,
+                q=n_bins,
+                labels=False,
+                duplicates="drop",
+            )
+        except ValueError:
+            continue
+
+        group_bins = pd.Series(
+            group_bins,
+            index=group_locations.index,
+        )
+
+        if group_bins.isna().any():
+            continue
+
+        bin_counts = group_bins.value_counts()
+
+        if (
+            int(group_bins.nunique()) >= 2
+            and int(bin_counts.min()) >= int(n_splits)
+        ):
+            group_to_stratum = group_bins.astype(int).astype(str)
+
+            y_strat = pd.Series(groups_np).map(group_to_stratum)
+
+            if y_strat.isna().any():
+                raise RuntimeError(
+                    "Could not map location-bin strata back to all rows."
+                )
+
+            print(
+                f"CV stratification: exact '{stratify_col}' values were "
+                f"too sparse for n_splits={n_splits} "
+                f"(minimum groups per exact location: {min_exact_count}). "
+                f"Using {int(group_bins.nunique())} quantile location bins."
+            )
+
+            return y_strat.astype(str).to_numpy()
+
+    raise ValueError(
+        f"Could not create valid location strata for '{stratify_col}' "
+        f"with n_splits={n_splits}. "
+        f"Number of event groups: {n_groups}. "
+        f"Minimum groups per exact location: {min_exact_count}."
+    )

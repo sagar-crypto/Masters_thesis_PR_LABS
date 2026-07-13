@@ -180,6 +180,254 @@ class KOLDualGRUCaseResidualRegressor(nn.Module):
 
         return residual
 
+class KOLGRUBoundedResidualFusionRegressor(nn.Module):
+    """Case-aware bounded residual model using an existing KOL rule.
+
+    The GRU predicts a gated residual signal. The final prediction is created
+    using apply_kol_prediction_rule_unclipped, so modes such as
+    threeph_add_ground_mul are actually applied.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_features: int,
+        n_op_features: int = 0,
+        hidden_size: int = 64,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+        bidirectional: bool = False,
+        n_cases: int = 10,
+        case_emb_dim: int = 8,
+        head_hidden_size: int = 64,
+        residual_max: float = 1.0,
+        gate_init_bias: float = -3.0,
+        prediction_mode: str = "threeph_add_ground_mul",
+    ) -> None:
+        super().__init__()
+
+        self.bidirectional = bool(bidirectional)
+        self.num_dirs = 2 if self.bidirectional else 1
+        self.n_op_features = int(n_op_features)
+
+        self.residual_max = float(residual_max)
+        self.prediction_mode = str(
+            prediction_mode
+        ).lower().strip()
+
+        if self.residual_max <= 0.0:
+            raise ValueError(
+                "residual_max must be positive, "
+                f"got {self.residual_max}"
+            )
+
+        self.gru = nn.GRU(
+            input_size=int(n_features),
+            hidden_size=int(hidden_size),
+            num_layers=int(num_layers),
+            dropout=(
+                float(dropout)
+                if int(num_layers) > 1
+                else 0.0
+            ),
+            batch_first=True,
+            bidirectional=self.bidirectional,
+        )
+
+        h_dim = (
+            int(hidden_size)
+            * self.num_dirs
+        )
+
+        self.case_emb = nn.Embedding(
+            num_embeddings=int(n_cases),
+            embedding_dim=int(case_emb_dim),
+        )
+
+        if self.n_op_features > 0:
+            self.op_norm = nn.BatchNorm1d(
+                self.n_op_features
+            )
+        else:
+            self.op_norm = None
+
+        # Inputs:
+
+        # Inputs:
+        # GRU hidden state
+        # physics prior
+        # fault-case embedding
+        fusion_in_dim = (
+            h_dim
+            + 1
+            + int(case_emb_dim)
+            + self.n_op_features
+        )
+
+        head_hidden_size = int(
+            head_hidden_size
+        )
+
+        self.shared_head = nn.Sequential(
+            nn.Linear(
+                fusion_in_dim,
+                head_hidden_size,
+            ),
+            nn.ReLU(),
+            nn.Linear(
+                head_hidden_size,
+                max(
+                    head_hidden_size // 2,
+                    8,
+                ),
+            ),
+            nn.ReLU(),
+        )
+
+        head_out_dim = max(
+            head_hidden_size // 2,
+            8,
+        )
+
+        self.residual_head = nn.Linear(
+            head_out_dim,
+            1,
+        )
+
+        self.gate_head = nn.Linear(
+            head_out_dim,
+            1,
+        )
+
+        # Start exactly from the physics prior.
+        nn.init.zeros_(
+            self.residual_head.weight
+        )
+        nn.init.zeros_(
+            self.residual_head.bias
+        )
+
+        nn.init.zeros_(
+            self.gate_head.weight
+        )
+        nn.init.constant_(
+            self.gate_head.bias,
+            float(gate_init_bias),
+        )
+
+    def forward(
+        self,
+        x_seq: torch.Tensor,
+        d_phys_prior: torch.Tensor,
+        case_idx: torch.Tensor,
+        op_features: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        out, _ = self.gru(
+            x_seq
+        )
+
+        h = out[:, -1, :]
+
+        case_embedding = self.case_emb(
+            case_idx.long()
+        )
+
+        fusion_pieces = [
+            h,
+            d_phys_prior.unsqueeze(1),
+            case_embedding,
+        ]
+
+        if self.n_op_features > 0:
+            if op_features is None:
+                raise ValueError(
+                    "op_features is required because "
+                    "n_op_features > 0"
+                )
+
+            if op_features.ndim == 1:
+                op_features = op_features.unsqueeze(1)
+
+            if op_features.shape[1] != self.n_op_features:
+                raise ValueError(
+                    "Unexpected operator-feature width: "
+                    f"received {op_features.shape[1]}, "
+                    f"expected {self.n_op_features}"
+                )
+
+            op_norm = self.op_norm
+
+            if op_norm is None:
+                raise RuntimeError(
+                    "op_norm is not initialized although "
+                    "n_op_features > 0"
+                )
+
+            normalized_op_features = op_norm(
+                op_features.float()
+            )
+
+            fusion_pieces.append(
+                normalized_op_features
+            )
+
+        fusion_input = torch.cat(
+            fusion_pieces,
+            dim=1,
+        )
+
+        shared = self.shared_head(
+            fusion_input
+        )
+
+        residual_proposal = (
+            self.residual_max
+            * torch.tanh(
+                self.residual_head(
+                    shared
+                )
+            ).squeeze(-1)
+        )
+
+        gate = torch.sigmoid(
+            self.gate_head(
+                shared
+            )
+        ).squeeze(-1)
+
+        # This is the residual passed to the established KOL rule.
+        residual = (
+            gate
+            * residual_proposal
+        )
+
+        d_pred_unclipped = (
+            apply_kol_prediction_rule_unclipped(
+                d_phys_prior=d_phys_prior,
+                case_idx=case_idx,
+                residual=residual,
+                mode=self.prediction_mode,
+            )
+        )
+
+        d_pred = torch.clamp(
+            d_pred_unclipped,
+            0.0,
+            1.0,
+        )
+
+        return (
+            d_pred,
+            d_pred_unclipped,
+            residual,
+            gate,
+        )
+
 
 
 def apply_kol_prediction_rule_unclipped(
@@ -492,3 +740,92 @@ def apply_kol_prediction_rule(
     )
 
     return torch.clamp(pred, 0.0, 1.0)
+
+
+
+class KOLGRULearnedFusionRegressor(nn.Module):
+    """Waveform GRU with a direct distance head and learned physics fusion.
+
+    The model predicts a direct waveform-based distance estimate d_gru and
+    combines it with the known two-ended physics prior:
+
+        d_kol = alpha * d_phys + (1 - alpha) * d_gru.
+
+    Both d_gru and d_kol are constrained to the normalized valid distance
+    interval [0, 1].  The fusion gate is initialized neutrally at alpha=0.5.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_features: int,
+        hidden_size: int = 128,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+        bidirectional: bool = False,
+    ) -> None:
+        super().__init__()
+
+        self.bidirectional = bool(bidirectional)
+        self.num_dirs = 2 if self.bidirectional else 1
+
+        self.gru = nn.GRU(
+            input_size=int(n_features),
+            hidden_size=int(hidden_size),
+            num_layers=int(num_layers),
+            dropout=float(dropout) if int(num_layers) > 1 else 0.0,
+            batch_first=True,
+            bidirectional=self.bidirectional,
+        )
+
+        h_dim = int(hidden_size) * self.num_dirs
+
+        # Direct waveform-only distance estimate.
+        self.direct_gru_head = nn.Linear(h_dim, 1)
+
+        # Event-specific fusion gate using waveform representation and d_phys.
+        self.alpha_head = nn.Linear(h_dim + 3, 1)
+
+        # Start from alpha = sigmoid(0) = 0.5 for every event.
+        # This prevents the model from initially collapsing to physics-only.
+        nn.init.zeros_(self.alpha_head.weight)
+        nn.init.zeros_(self.alpha_head.bias)
+
+    def forward(
+        self,
+        x_seq: torch.Tensor,
+        d_phys_prior: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        out, _ = self.gru(x_seq)
+        h = out[:, -1, :]
+
+        # Target locations are normalized to [0, 1], so keep the direct
+        # waveform estimate in the same physically valid interval.
+        d_gru = torch.sigmoid(
+            self.direct_gru_head(h)
+        ).squeeze(-1)
+
+        prior_gru_gap = torch.abs(
+            d_phys_prior - d_gru
+        )
+
+        alpha_input = torch.cat(
+            [
+                h,
+                d_phys_prior.unsqueeze(1),
+                d_gru.unsqueeze(1),
+                prior_gru_gap.unsqueeze(1),
+            ],
+            dim=1,
+        )
+
+        alpha = torch.sigmoid(
+            self.alpha_head(alpha_input)
+        ).squeeze(-1)
+
+        d_kol = (
+            alpha * d_phys_prior
+            + (1.0 - alpha) * d_gru
+        )
+
+        return d_kol, d_gru, alpha
