@@ -24,7 +24,12 @@ from KOL.common.cv_utils import (
     validate_checkpoint_metadata,
 )
 from KOL.datasets.kol_datasets import make_kol_loaders, make_kol_dual_loaders
-from KOL.models.kol_residual_models import KOLGRUCaseResidualRegressor, KOLDualGRUCaseResidualRegressor, KOLGRULearnedFusionRegressor
+from KOL.models.kol_residual_models import (
+    KOLGRUCaseResidualRegressor,
+    KOLDualGRUCaseResidualRegressor,
+    KOLGRULearnedFusionRegressor,
+    KOLGRUBoundedResidualFusionRegressor,
+)
 from KOL.training.kol_residual_train import (
     evaluate_kol_case_k0,
     evaluate_learned_fusion,
@@ -381,27 +386,36 @@ def run_one_fold(
                 "First KOL residual version currently supports regression only."
             )
 
-        if kol_model_mode in {"gru_only", "learned_fusion"}:
+        if kol_model_mode in {
+            "gru_only",
+            "learned_fusion",
+            "bounded_residual_fusion",
+        }:
             if X_phasor_all is not None:
                 raise NotImplementedError(
-                    "The final learned-fusion pipeline supports "
+                    "The GRU fusion pipelines support "
                     "training.input_representation=waveform only."
                 )
+            op_features_for_loader = (
+                op_features
+                if kol_model_mode == "bounded_residual_fusion"
+                else None
+            )
 
             train_loader, val_loader, test_loader = make_kol_loaders(
-                X_used=X_used_filtered,
-                y_all=y_all,
-                d_phys_prior=d_phys_prior,
-                case_idx=case_idx,
-                op_features=None,
-                idx_train=idx_train,
-                idx_val=idx_val,
-                idx_test=test_idx,
-                feature_indices_for_ds=feature_indices_for_ds,
-                batch_size=int(config.training.batch_size),
-                num_workers=int(config.training.num_workers),
-                pin_memory=bool(config.training.pin_memory),
-            )
+                    X_used=X_used_filtered,
+                    y_all=y_all,
+                    d_phys_prior=d_phys_prior,
+                    case_idx=case_idx,
+                    op_features=op_features_for_loader,
+                    idx_train=idx_train,
+                    idx_val=idx_val,
+                    idx_test=test_idx,
+                    feature_indices_for_ds=feature_indices_for_ds,
+                    batch_size=int(config.training.batch_size),
+                    num_workers=int(config.training.num_workers),
+                    pin_memory=bool(config.training.pin_memory),
+                )
 
         elif X_phasor_all is not None:
             train_loader, val_loader, test_loader = make_kol_dual_loaders(
@@ -440,14 +454,111 @@ def run_one_fold(
             logger.info("op_features shape: %s", op_features.shape)
             logger.info("n_op_features passed to model: %d", int(op_features.shape[1]))
 
-        if kol_model_mode in {"gru_only", "learned_fusion"}:
+        if kol_model_mode in {
+            "gru_only",
+            "learned_fusion",
+        }:
             model = KOLGRULearnedFusionRegressor(
                 n_features=int(F_eff),
-                hidden_size=int(getattr(config.model, "hidden_size", 128)),
-                num_layers=int(getattr(config.model, "num_layers", 2)),
-                dropout=float(getattr(config.model, "dropout", 0.1)),
+                hidden_size=int(
+                    getattr(
+                        config.model,
+                        "hidden_size",
+                        128,
+                    )
+                ),
+                num_layers=int(
+                    getattr(
+                        config.model,
+                        "num_layers",
+                        2,
+                    )
+                ),
+                dropout=float(
+                    getattr(
+                        config.model,
+                        "dropout",
+                        0.1,
+                    )
+                ),
                 bidirectional=bool(
-                    getattr(config.model, "bidirectional", False)
+                    getattr(
+                        config.model,
+                        "bidirectional",
+                        False,
+                    )
+                ),
+            ).to(device)
+
+        elif kol_model_mode == "bounded_residual_fusion":
+            model = KOLGRUBoundedResidualFusionRegressor(
+                n_features=int(F_eff),
+                n_op_features=(
+                    0
+                    if op_features is None
+                    else int(op_features.shape[1])
+                ),
+                hidden_size=int(
+                    getattr(
+                        config.model,
+                        "hidden_size",
+                        64,
+                    )
+                ),
+                num_layers=int(
+                    getattr(
+                        config.model,
+                        "num_layers",
+                        1,
+                    )
+                ),
+                dropout=float(
+                    getattr(
+                        config.model,
+                        "dropout",
+                        0.0,
+                    )
+                ),
+                bidirectional=bool(
+                    getattr(
+                        config.model,
+                        "bidirectional",
+                        False,
+                    )
+                ),
+                n_cases=len(
+                    CASE_TO_IDX
+                ),
+                case_emb_dim=int(
+                    getattr(
+                        config.training,
+                        "case_emb_dim",
+                        8,
+                    )
+                ),
+                head_hidden_size=int(
+                    getattr(
+                        config.training,
+                        "fusion_head_hidden_size",
+                        64,
+                    )
+                ),
+                residual_max=float(
+                    getattr(
+                        config.training,
+                        "bounded_residual_max",
+                        1.0,
+                    )
+                ),
+                gate_init_bias=float(
+                    getattr(
+                        config.training,
+                        "gate_init_bias",
+                        -3.0,
+                    )
+                ),
+                prediction_mode=(
+                    kol_prediction_mode
                 ),
             ).to(device)
 
@@ -508,7 +619,7 @@ def run_one_fold(
             logger.info("Loaded checkpoint: %s", ckpt_path)
 
         else:
-            if kol_model_mode in {"gru_only", "learned_fusion"}:
+            if kol_model_mode in {"gru_only", "learned_fusion", "bounded_residual_fusion"}:
                 train_learned_fusion(
                     model=model,
                     train_loader=train_loader,
@@ -537,7 +648,29 @@ def run_one_fold(
                     logger=logger,
                 )
 
-        if kol_model_mode in {"gru_only", "learned_fusion"}:
+        if kol_model_mode == "bounded_residual_fusion":
+            (
+                test_metrics,
+                y_true_np,
+                y_pred_np,
+                dprior_np,
+                residual_np,
+                alpha_np,
+                case_np,
+            ) = evaluate_learned_fusion(
+                model=model,
+                test_loader=test_loader,
+                device=device,
+                logger=logger,
+                model_mode=kol_model_mode,
+            )
+
+            y_score_np = residual_np
+
+        elif kol_model_mode in {
+            "gru_only",
+            "learned_fusion",
+        }:
             (
                 test_metrics,
                 y_true_np,

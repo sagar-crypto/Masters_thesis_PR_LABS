@@ -338,169 +338,429 @@ def train_learned_fusion(
     epochs: int = 20,
     patience: int = 15,
 ):
-    """
-    Train the direct GRU or learned-fusion model.
+    """Train GRU-only, convex fusion, or bounded residual fusion."""
 
-    Supported modes:
-        gru_only:
-            loss = MSE(d_gru, y)
+    model_mode = str(
+        model_mode
+    ).lower().strip()
 
-        learned_fusion:
-            loss = MSE(d_kol, y)
+    supported_modes = {
+        "gru_only",
+        "learned_fusion",
+        "bounded_residual_fusion",
+    }
 
-    The learned_fusion mode is not residual correction. Its output is:
-
-        d_kol = alpha * d_prior + (1 - alpha) * d_gru
-    """
-    model_mode = str(model_mode).lower().strip()
-
-    if model_mode not in {"gru_only", "learned_fusion"}:
+    if model_mode not in supported_modes:
         raise ValueError(
-            "model_mode must be 'gru_only' or 'learned_fusion', "
-            f"got '{model_mode}'."
+            f"Unsupported model_mode="
+            f"'{model_mode}'. "
+            f"Supported modes: "
+            f"{sorted(supported_modes)}"
         )
 
-    criterion = nn.MSELoss()
+    if model_mode == "bounded_residual_fusion":
+        criterion = nn.SmoothL1Loss(
+            beta=0.05
+        )
+    else:
+        criterion = nn.MSELoss()
 
-    best_val_loss = float("inf")
+    best_val_score = float("inf")
     best_state = None
     bad_epochs = 0
 
-    for epoch in range(epochs):
+    for epoch in range(int(epochs)):
         model.train()
+
         train_losses = []
+        train_residuals = []
+        train_gates = []
 
         for batch in train_loader:
-            batch_dict = _move_kol_batch_to_device(batch, device)
+            batch_dict = (
+                _move_kol_batch_to_device(
+                    batch,
+                    device,
+                )
+            )
 
             if batch_dict["is_dual"]:
                 raise NotImplementedError(
-                    "The final learned-fusion pipeline supports waveform "
-                    "input only, not dual waveform-plus-phasor input."
+                    "GRU fusion modes support "
+                    "waveform input only."
                 )
 
             x_seq = batch_dict["x_seq"]
             d_prior = batch_dict["d_prior"]
+            case_idx = batch_dict["c_idx"]
+            op_feat = batch_dict["op_feat"]
             y = batch_dict["y"]
 
             optimizer.zero_grad()
 
-            d_kol, d_gru, alpha = model(
-                x_seq,
-                d_prior,
-            )
+            if (
+                model_mode
+                == "bounded_residual_fusion"
+            ):
+                (
+                    d_kol,
+                    d_kol_unclipped,
+                    residual,
+                    gate,
+                ) = model(
+                    x_seq,
+                    d_prior,
+                    case_idx,
+                    op_feat
+                )
 
-            if model_mode == "gru_only":
-                # Train the direct waveform GRU estimate only.
-                prediction_for_loss = d_gru
-                loss = criterion(d_gru, y)
+                main_loss = criterion(
+                    d_kol_unclipped,
+                    y,
+                )
 
-            elif model_mode == "learned_fusion":
-                # Final output used for the fusion prediction.
-                prediction_for_loss = d_kol
-
-                # Keep the final learned-fusion objective.
-                fusion_loss = criterion(d_kol, y)
-
-                # Ensure the waveform GRU also learns a useful direct estimate,
-                # even when alpha becomes close to 1.
-                direct_gru_loss = criterion(d_gru, y)
-
-                direct_gru_loss_weight = 1.0
+                # Small regularization only.
+                residual_penalty = (
+                    residual.abs().mean()
+                )
 
                 loss = (
-                    fusion_loss
-                    + direct_gru_loss_weight * direct_gru_loss
+                    main_loss
+                    + 0.001
+                    * residual_penalty
+                )
+
+                train_residuals.append(
+                    residual.detach()
+                    .cpu()
+                    .numpy()
+                )
+
+                train_gates.append(
+                    gate.detach()
+                    .cpu()
+                    .numpy()
                 )
 
             else:
-                raise ValueError(
-                    f"Unsupported model_mode: {model_mode}"
-                )
-            loss.backward()
-            optimizer.step()
-
-            train_losses.append(float(loss.item()))
-
-        model.eval()
-
-        val_losses = []
-        alpha_values = []
-        d_gru_values = []
-
-        with torch.no_grad():
-            for batch in val_loader:
-                batch_dict = _move_kol_batch_to_device(batch, device)
-
-                if batch_dict["is_dual"]:
-                    raise NotImplementedError(
-                        "The final learned-fusion pipeline supports waveform "
-                        "input only, not dual waveform-plus-phasor input."
-                    )
-
-                x_seq = batch_dict["x_seq"]
-                d_prior = batch_dict["d_prior"]
-                y = batch_dict["y"]
-
-                d_kol, d_gru, alpha = model(
+                (
+                    d_kol,
+                    d_gru,
+                    alpha,
+                ) = model(
                     x_seq,
                     d_prior,
                 )
 
                 if model_mode == "gru_only":
-                    prediction_for_loss = d_gru
+                    loss = criterion(
+                        d_gru,
+                        y,
+                    )
+
+                elif model_mode == "learned_fusion":
+                    fusion_loss = criterion(
+                        d_kol,
+                        y,
+                    )
+
+                    direct_gru_loss = criterion(
+                        d_gru,
+                        y,
+                    )
+
+                    loss = (
+                        fusion_loss
+                        + direct_gru_loss
+                    )
+
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=5.0,
+            )
+
+            optimizer.step()
+
+            train_losses.append(
+                float(loss.item())
+            )
+
+        model.eval()
+
+        val_losses = []
+        val_abs_errors = []
+        val_residuals = []
+        val_gates = []
+        val_aux_values = []
+
+        with torch.no_grad():
+            for batch in val_loader:
+                batch_dict = (
+                    _move_kol_batch_to_device(
+                        batch,
+                        device,
+                    )
+                )
+
+                if batch_dict["is_dual"]:
+                    raise NotImplementedError(
+                        "GRU fusion modes support "
+                        "waveform input only."
+                    )
+
+                x_seq = batch_dict["x_seq"]
+                d_prior = batch_dict["d_prior"]
+                case_idx = batch_dict["c_idx"]
+                op_feat = batch_dict["op_feat"]
+                y = batch_dict["y"]
+
+                if (
+                    model_mode
+                    == "bounded_residual_fusion"
+                ):
+                    (
+                        d_kol,
+                        d_kol_unclipped,
+                        residual,
+                        gate,
+                    ) = model(
+                        x_seq,
+                        d_prior,
+                        case_idx,
+                        op_feat,
+                    )
+
+                    val_loss = criterion(
+                        d_kol_unclipped,
+                        y,
+                    )
+
+                    prediction_for_metrics = (
+                        d_kol
+                    )
+
+                    val_residuals.append(
+                        residual.detach()
+                        .cpu()
+                        .numpy()
+                    )
+
+                    val_gates.append(
+                        gate.detach()
+                        .cpu()
+                        .numpy()
+                    )
+
                 else:
-                    prediction_for_loss = d_kol
+                    (
+                        d_kol,
+                        d_gru,
+                        alpha,
+                    ) = model(
+                        x_seq,
+                        d_prior,
+                    )
 
-                val_loss = criterion(prediction_for_loss, y)
+                    if model_mode == "gru_only":
+                        prediction_for_metrics = (
+                            d_gru
+                        )
+                    else:
+                        prediction_for_metrics = (
+                            d_kol
+                        )
 
-                val_losses.append(float(val_loss.item()))
-                alpha_values.append(alpha.detach().cpu().numpy())
-                d_gru_values.append(d_gru.detach().cpu().numpy())
+                    val_loss = criterion(
+                        prediction_for_metrics,
+                        y,
+                    )
+
+                    val_aux_values.append(
+                        d_gru.detach()
+                        .cpu()
+                        .numpy()
+                    )
+
+                    val_gates.append(
+                        alpha.detach()
+                        .cpu()
+                        .numpy()
+                    )
+
+                val_losses.append(
+                    float(val_loss.item())
+                )
+
+                val_abs_errors.append(
+                    torch.abs(
+                        prediction_for_metrics
+                        - y
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
 
         mean_train_loss = (
-            float(np.mean(train_losses))
+            float(
+                np.mean(
+                    train_losses
+                )
+            )
             if train_losses
             else float("nan")
         )
 
         mean_val_loss = (
-            float(np.mean(val_losses))
+            float(
+                np.mean(
+                    val_losses
+                )
+            )
             if val_losses
             else float("inf")
         )
 
-        mean_alpha = (
-            float(np.mean(np.concatenate(alpha_values)))
-            if alpha_values
-            else float("nan")
+        mean_val_mae = (
+            float(
+                np.mean(
+                    np.concatenate(
+                        val_abs_errors
+                    )
+                )
+            )
+            if val_abs_errors
+            else float("inf")
         )
 
-        mean_d_gru = (
-            float(np.mean(np.concatenate(d_gru_values)))
-            if d_gru_values
-            else float("nan")
-        )
+        if (
+            model_mode
+            == "bounded_residual_fusion"
+        ):
+            mean_gate = (
+                float(
+                    np.mean(
+                        np.concatenate(
+                            val_gates
+                        )
+                    )
+                )
+                if val_gates
+                else float("nan")
+            )
 
-        logger.info(
-            "epoch %d | mode=%s | train_loss=%.6f | val_loss=%.6f "
-            "| mean_alpha=%.6f | mean_d_gru=%.6f",
-            epoch + 1,
-            model_mode,
-            mean_train_loss,
-            mean_val_loss,
-            mean_alpha,
-            mean_d_gru,
-        )
+            mean_residual = (
+                float(
+                    np.mean(
+                        np.concatenate(
+                            val_residuals
+                        )
+                    )
+                )
+                if val_residuals
+                else float("nan")
+            )
+
+            mean_abs_residual = (
+                float(
+                    np.mean(
+                        np.abs(
+                            np.concatenate(
+                                val_residuals
+                            )
+                        )
+                    )
+                )
+                if val_residuals
+                else float("nan")
+            )
+
+            logger.info(
+                "epoch %d | mode=%s | "
+                "train_loss=%.6f | "
+                "val_loss=%.6f | "
+                "val_mae=%.6f | "
+                "mean_gate=%.6f | "
+                "mean_residual=%.6f | "
+                "mean_abs_residual=%.6f",
+                epoch + 1,
+                model_mode,
+                mean_train_loss,
+                mean_val_loss,
+                mean_val_mae,
+                mean_gate,
+                mean_residual,
+                mean_abs_residual,
+            )
+
+            # Select the checkpoint using the thesis metric.
+            checkpoint_score = (
+                mean_val_mae
+            )
+
+        else:
+            mean_alpha = (
+                float(
+                    np.mean(
+                        np.concatenate(
+                            val_gates
+                        )
+                    )
+                )
+                if val_gates
+                else float("nan")
+            )
+
+            mean_d_gru = (
+                float(
+                    np.mean(
+                        np.concatenate(
+                            val_aux_values
+                        )
+                    )
+                )
+                if val_aux_values
+                else float("nan")
+            )
+
+            logger.info(
+                "epoch %d | mode=%s | "
+                "train_loss=%.6f | "
+                "val_loss=%.6f | "
+                "val_mae=%.6f | "
+                "mean_alpha=%.6f | "
+                "mean_d_gru=%.6f",
+                epoch + 1,
+                model_mode,
+                mean_train_loss,
+                mean_val_loss,
+                mean_val_mae,
+                mean_alpha,
+                mean_d_gru,
+            )
+
+            checkpoint_score = (
+                mean_val_loss
+            )
 
         min_delta = 1e-4
 
-        if mean_val_loss < (best_val_loss - min_delta):
-            best_val_loss = mean_val_loss
+        if checkpoint_score < (
+            best_val_score
+            - min_delta
+        ):
+            best_val_score = (
+                checkpoint_score
+            )
 
             best_state = {
-                key: value.detach().cpu().clone()
-                for key, value in model.state_dict().items()
+                key: value.detach()
+                .cpu()
+                .clone()
+                for key, value
+                in model.state_dict().items()
             }
 
             bad_epochs = 0
@@ -508,20 +768,23 @@ def train_learned_fusion(
         else:
             bad_epochs += 1
 
-            if bad_epochs >= patience:
+            if bad_epochs >= int(patience):
                 logger.info(
                     "Early stopping at epoch %d | "
-                    "best_val_loss=%.6f | current_val_loss=%.6f",
+                    "best_val_score=%.6f | "
+                    "current_val_score=%.6f",
                     epoch + 1,
-                    best_val_loss,
-                    mean_val_loss,
+                    best_val_score,
+                    checkpoint_score,
                 )
                 break
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        model.load_state_dict(
+            best_state
+        )
 
-    return best_val_loss
+    return best_val_score
 
 
 def evaluate_learned_fusion(
@@ -531,30 +794,24 @@ def evaluate_learned_fusion(
     logger,
     model_mode: str,
 ):
-    """
-    Evaluate the final direct-GRU or learned-fusion model.
+    """Evaluate direct GRU, convex fusion, or bounded residual fusion."""
 
-    Returns:
-        metrics
-        y_true
-        y_pred
-        d_prior
-        d_gru
-        alpha
-        case_idx
+    model_mode = str(
+        model_mode
+    ).lower().strip()
 
-    For gru_only:
-        y_pred = d_gru
+    supported_modes = {
+        "gru_only",
+        "learned_fusion",
+        "bounded_residual_fusion",
+    }
 
-    For learned_fusion:
-        y_pred = d_kol
-    """
-    model_mode = str(model_mode).lower().strip()
-
-    if model_mode not in {"gru_only", "learned_fusion"}:
+    if model_mode not in supported_modes:
         raise ValueError(
-            "model_mode must be 'gru_only' or 'learned_fusion', "
-            f"got '{model_mode}'."
+            f"Unsupported model_mode="
+            f"'{model_mode}'. "
+            f"Supported modes: "
+            f"{sorted(supported_modes)}"
         )
 
     model.eval()
@@ -562,117 +819,382 @@ def evaluate_learned_fusion(
     y_true_all = []
     y_pred_all = []
     d_prior_all = []
-    d_gru_all = []
+    auxiliary_all = []
     alpha_all = []
     case_all = []
 
     with torch.no_grad():
         for batch in test_loader:
-            batch_dict = _move_kol_batch_to_device(batch, device)
+            batch_dict = (
+                _move_kol_batch_to_device(
+                    batch,
+                    device,
+                )
+            )
 
             if batch_dict["is_dual"]:
                 raise NotImplementedError(
-                    "The final learned-fusion pipeline supports waveform "
-                    "input only, not dual waveform-plus-phasor input."
+                    "GRU fusion modes support "
+                    "waveform input only."
                 )
 
             x_seq = batch_dict["x_seq"]
             d_prior = batch_dict["d_prior"]
             case_idx = batch_dict["c_idx"]
+            op_feat = batch_dict["op_feat"]
             y = batch_dict["y"]
 
-            d_kol, d_gru, alpha = model(
-                x_seq,
-                d_prior,
+            if (
+                model_mode
+                == "bounded_residual_fusion"
+            ):
+                (
+                    d_kol,
+                    d_kol_unclipped,
+                    residual,
+                    gate,
+                ) = model(
+                    x_seq,
+                    d_prior,
+                    case_idx,
+                    op_feat
+                )
+
+                y_pred = d_kol
+                auxiliary = residual
+                alpha = gate
+
+            else:
+                (
+                    d_kol,
+                    d_gru,
+                    alpha,
+                ) = model(
+                    x_seq,
+                    d_prior,
+                )
+
+                if model_mode == "gru_only":
+                    y_pred = d_gru
+                else:
+                    y_pred = d_kol
+
+                auxiliary = d_gru
+
+            y_true_all.append(
+                y.detach()
+                .cpu()
+                .numpy()
             )
 
-            if model_mode == "gru_only":
-                y_pred = d_gru
-            else:
-                y_pred = d_kol
+            y_pred_all.append(
+                y_pred.detach()
+                .cpu()
+                .numpy()
+            )
 
-            y_true_all.append(y.detach().cpu().numpy())
-            y_pred_all.append(y_pred.detach().cpu().numpy())
-            d_prior_all.append(d_prior.detach().cpu().numpy())
-            d_gru_all.append(d_gru.detach().cpu().numpy())
-            alpha_all.append(alpha.detach().cpu().numpy())
-            case_all.append(case_idx.detach().cpu().numpy())
+            d_prior_all.append(
+                d_prior.detach()
+                .cpu()
+                .numpy()
+            )
 
-    y_true_np = np.concatenate(y_true_all).astype(np.float64)
-    y_pred_np = np.concatenate(y_pred_all).astype(np.float64)
-    d_prior_np = np.concatenate(d_prior_all).astype(np.float64)
-    d_gru_np = np.concatenate(d_gru_all).astype(np.float64)
-    alpha_np = np.concatenate(alpha_all).astype(np.float64)
-    case_np = np.concatenate(case_all).astype(np.int64)
+            auxiliary_all.append(
+                auxiliary.detach()
+                .cpu()
+                .numpy()
+            )
 
-    mse = float(np.mean((y_pred_np - y_true_np) ** 2))
-    mae = float(np.mean(np.abs(y_pred_np - y_true_np)))
-    rmse = float(np.sqrt(mse))
+            alpha_all.append(
+                alpha.detach()
+                .cpu()
+                .numpy()
+            )
+
+            case_all.append(
+                case_idx.detach()
+                .cpu()
+                .numpy()
+            )
+
+    y_true_np = np.concatenate(
+        y_true_all
+    ).astype(np.float64)
+
+    y_pred_np = np.concatenate(
+        y_pred_all
+    ).astype(np.float64)
+
+    d_prior_np = np.concatenate(
+        d_prior_all
+    ).astype(np.float64)
+
+    auxiliary_np = np.concatenate(
+        auxiliary_all
+    ).astype(np.float64)
+
+    alpha_np = np.concatenate(
+        alpha_all
+    ).astype(np.float64)
+
+    case_np = np.concatenate(
+        case_all
+    ).astype(np.int64)
+
+    squared_error = (
+        y_pred_np
+        - y_true_np
+    ) ** 2
+
+    abs_error = np.abs(
+        y_pred_np
+        - y_true_np
+    )
+
+    prior_abs_error = np.abs(
+        d_prior_np
+        - y_true_np
+    )
+
+    mse = float(
+        np.mean(
+            squared_error
+        )
+    )
+
+    mae = float(
+        np.mean(
+            abs_error
+        )
+    )
+
+    rmse = float(
+        np.sqrt(
+            mse
+        )
+    )
 
     prior_mae = float(
-        np.mean(np.abs(d_prior_np - y_true_np))
+        np.mean(
+            prior_abs_error
+        )
     )
 
     prior_rmse = float(
-        np.sqrt(np.mean((d_prior_np - y_true_np) ** 2))
+        np.sqrt(
+            np.mean(
+                (
+                    d_prior_np
+                    - y_true_np
+                ) ** 2
+            )
+        )
     )
 
-    direct_gru_mae = float(
-        np.mean(np.abs(d_gru_np - y_true_np))
+    alpha_mean = float(
+        np.mean(
+            alpha_np
+        )
     )
 
-    direct_gru_rmse = float(
-        np.sqrt(np.mean((d_gru_np - y_true_np) ** 2))
+    alpha_std = float(
+        np.std(
+            alpha_np
+        )
     )
 
-    alpha_min = float(np.min(alpha_np))
-    alpha_max = float(np.max(alpha_np))
-    alpha_mean = float(np.mean(alpha_np))
-    alpha_std = float(np.std(alpha_np))
-
-    logger.info(
-        "Final model evaluation | mode=%s | "
-        "mae=%.6f | rmse=%.6f | "
-        "prior_mae=%.6f | prior_rmse=%.6f | "
-        "direct_gru_mae=%.6f | direct_gru_rmse=%.6f",
-        model_mode,
-        mae,
-        rmse,
-        prior_mae,
-        prior_rmse,
-        direct_gru_mae,
-        direct_gru_rmse,
+    alpha_min = float(
+        np.min(
+            alpha_np
+        )
     )
 
-    logger.info(
-        "Fusion alpha statistics | "
-        "mean=%.6f | std=%.6f | min=%.6f | max=%.6f",
-        alpha_mean,
-        alpha_std,
-        alpha_min,
-        alpha_max,
+    alpha_max = float(
+        np.max(
+            alpha_np
+        )
     )
 
-    metrics = {
-        "loss": mse,
-        "mae": mae,
-        "rmse": rmse,
-        "prior_mae": prior_mae,
-        "prior_rmse": prior_rmse,
-        "direct_gru_mae": direct_gru_mae,
-        "direct_gru_rmse": direct_gru_rmse,
-        "alpha_mean": alpha_mean,
-        "alpha_std": alpha_std,
-        "alpha_min": alpha_min,
-        "alpha_max": alpha_max,
-    }
+    if (
+        model_mode
+        == "bounded_residual_fusion"
+    ):
+        effective_correction = (
+            y_pred_np
+            - d_prior_np
+        )
+
+        improvement_rate = float(
+            np.mean(
+                abs_error
+                < prior_abs_error
+            )
+        )
+
+        worsened_rate = float(
+            np.mean(
+                abs_error
+                > prior_abs_error
+            )
+        )
+
+        metrics = {
+            "loss": mse,
+            "mae": mae,
+            "rmse": rmse,
+            "prior_mae": prior_mae,
+            "prior_rmse": prior_rmse,
+            "residual_mean": float(
+                np.mean(
+                    auxiliary_np
+                )
+            ),
+            "residual_abs_mean": float(
+                np.mean(
+                    np.abs(
+                        auxiliary_np
+                    )
+                )
+            ),
+            "residual_std": float(
+                np.std(
+                    auxiliary_np
+                )
+            ),
+            "alpha_mean": alpha_mean,
+            "alpha_std": alpha_std,
+            "alpha_min": alpha_min,
+            "alpha_max": alpha_max,
+            "improvement_rate": (
+                improvement_rate
+            ),
+            "worsened_rate": (
+                worsened_rate
+            ),
+            "effective_correction_mean": float(
+                np.mean(
+                    effective_correction
+                )
+            ),
+            "effective_correction_abs_mean": float(
+                np.mean(
+                    np.abs(
+                        effective_correction
+                    )
+                )
+            ),
+            "effective_correction_std": float(
+                np.std(
+                    effective_correction
+                )
+            ),
+        }
+
+        logger.info(
+            "Final model evaluation | "
+            "mode=%s | mae=%.6f | "
+            "rmse=%.6f | "
+            "prior_mae=%.6f | "
+            "prior_rmse=%.6f",
+            model_mode,
+            mae,
+            rmse,
+            prior_mae,
+            prior_rmse,
+        )
+
+        logger.info(
+            "Residual/gate statistics | "
+            "residual_mean=%.6f | "
+            "residual_abs_mean=%.6f | "
+            "residual_std=%.6f | "
+            "gate_mean=%.6f | "
+            "gate_std=%.6f",
+            metrics["residual_mean"],
+            metrics["residual_abs_mean"],
+            metrics["residual_std"],
+            alpha_mean,
+            alpha_std,
+        )
+
+        logger.info(
+            "Prior correction statistics | "
+            "improvement_rate=%.4f | "
+            "worsened_rate=%.4f | "
+            "effective_correction_mean=%.6f | "
+            "effective_correction_abs_mean=%.6f",
+            improvement_rate,
+            worsened_rate,
+            metrics[
+                "effective_correction_mean"
+            ],
+            metrics[
+                "effective_correction_abs_mean"
+            ],
+        )
+
+    else:
+        direct_gru_mae = float(
+            np.mean(
+                np.abs(
+                    auxiliary_np
+                    - y_true_np
+                )
+            )
+        )
+
+        direct_gru_rmse = float(
+            np.sqrt(
+                np.mean(
+                    (
+                        auxiliary_np
+                        - y_true_np
+                    ) ** 2
+                )
+            )
+        )
+
+        metrics = {
+            "loss": mse,
+            "mae": mae,
+            "rmse": rmse,
+            "prior_mae": prior_mae,
+            "prior_rmse": prior_rmse,
+            "direct_gru_mae": (
+                direct_gru_mae
+            ),
+            "direct_gru_rmse": (
+                direct_gru_rmse
+            ),
+            "alpha_mean": alpha_mean,
+            "alpha_std": alpha_std,
+            "alpha_min": alpha_min,
+            "alpha_max": alpha_max,
+        }
+
+        logger.info(
+            "Final model evaluation | "
+            "mode=%s | mae=%.6f | "
+            "rmse=%.6f | "
+            "prior_mae=%.6f | "
+            "prior_rmse=%.6f | "
+            "direct_gru_mae=%.6f | "
+            "direct_gru_rmse=%.6f",
+            model_mode,
+            mae,
+            rmse,
+            prior_mae,
+            prior_rmse,
+            direct_gru_mae,
+            direct_gru_rmse,
+        )
 
     return (
         metrics,
         y_true_np,
         y_pred_np,
         d_prior_np,
-        d_gru_np,
+        auxiliary_np,
         alpha_np,
         case_np,
     )

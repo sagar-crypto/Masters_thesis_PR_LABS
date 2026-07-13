@@ -97,7 +97,7 @@ def _prepare_kol_inputs(
 
     logger.info("KOL model mode: %s", kol_model_mode)
     logger.info(
-        "KOL prediction mode (legacy residual path only): %s",
+        "KOL prediction mode: %s",
         kol_prediction_mode,
     )
     logger.info("Selected operator feature columns: %s", operator_feature_cols)
@@ -263,14 +263,17 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
     )
 
     logger.info("KOL window mode: %s", kol_window_mode if use_ops else "n/a")
-    if kol_model_mode in {"gru_only", "learned_fusion"}:
+    if kol_model_mode in {
+        "gru_only",
+        "learned_fusion",
+        "bounded_residual_fusion",
+    }:
         if d_phys_prior is None:
             raise ValueError(
-                "The final GRU-only and learned-fusion pipeline requires "
+                "The GRU fusion pipelines require "
                 "training.use_operator_features=true and a valid "
-                "two-ended physics-prior CSV."
+                "physics-prior CSV."
             )
-
     y_all, class_to_idx = _prepare_targets(
         labels_df_used=labels_df_used,
         target_label=target_label,
@@ -309,14 +312,21 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         if kol_model_mode == "legacy_residual":
             model_name = f"kol_{kol_mode}_{base_model_name}"
 
-        elif kol_model_mode in {"gru_only", "learned_fusion"}:
-            model_name = f"kol_{kol_model_mode}_{base_model_name}"
+        elif kol_model_mode in {
+            "gru_only",
+            "learned_fusion",
+            "bounded_residual_fusion",
+        }:
+            model_name = (
+                f"kol_{kol_model_mode}_{base_model_name}"
+            )
 
         else:
             raise ValueError(
                 "Unknown training.kol_model_mode="
                 f"'{kol_model_mode}'. Supported values are: "
-                "legacy_residual, gru_only, learned_fusion."
+                "legacy_residual, gru_only, learned_fusion, "
+                "bounded_residual_fusion."
             )
 
     window_s = float(config.window_extraction.window_length)
