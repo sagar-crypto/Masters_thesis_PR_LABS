@@ -209,3 +209,9 @@ __marimo__/
 *.err
 *.out
 outputs/*
+<<<<<<< Updated upstream
+=======
+thesis_evidence
+dataset_insights_plots
+figures
+>>>>>>> Stashed changes

@@ -166,18 +166,44 @@ def load_filtered_training_data(
         logger=logger,
     )
 
-    use_ops = bool(getattr(config.training, "use_operator_features", False))
-    kol_window_mode = str(
-        getattr(config.training, "kol_window_mode", "single_fault_start")
+    use_ops = bool(
+        getattr(
+            config.training,
+            "use_operator_features",
+            False,
+        )
     )
 
-    labels_df_used, X_used_filtered = _apply_kol_window_filter_if_enabled(
-        labels_df_used=labels_df_used,
-        X_used_filtered=X_used_filtered,
-        config=config,
-        use_ops=use_ops,
-        kol_window_mode=kol_window_mode,
-        logger=logger,
+    kol_window_mode = str(
+        getattr(
+            config.training,
+            "kol_window_mode",
+            "single_fault_start",
+        )
+    )
+
+    apply_window_filter_without_operator = bool(
+        getattr(
+            config.training,
+            "apply_window_filter_without_operator",
+            False,
+        )
+    )
+
+    apply_window_filter = (
+        use_ops
+        or apply_window_filter_without_operator
+    )
+
+    labels_df_used, X_used_filtered = (
+        _apply_kol_window_filter_if_enabled(
+            labels_df_used=labels_df_used,
+            X_used_filtered=X_used_filtered,
+            config=config,
+            use_ops=apply_window_filter,
+            kol_window_mode=kol_window_mode,
+            logger=logger,
+        )
     )
 
     return PreparedTrainingData(

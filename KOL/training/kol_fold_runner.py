@@ -289,7 +289,7 @@ def run_one_fold(
             num_workers=int(config.training.num_workers),
             pin_memory=bool(config.training.pin_memory),
             prefetch_factor=int(config.training.prefetch_factor),
-            row_indices=valid_row_idx,
+            row_indices=None,
         )
 
         model = create_model_from_name(
