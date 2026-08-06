@@ -1,0 +1,5 @@
+name: protect90
+voltage_kv: 90
+waveform_path: ${paths.waveform_root}/protect90
+model_input_path: ${paths.model_input_root}/protect90.csv
+

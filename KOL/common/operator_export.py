@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -32,7 +34,8 @@ def run_formula_audit(
         max_print=40,
     )
 
-    audit_path = "/home/vault/iwi5/iwi5305h/run_kol_formula_audit.csv"
+    audit_path = Path(os.environ.get("KOL_OUTPUT_ROOT", "outputs/reproducibility_validation/hydra_v1")) / "run_kol_formula_audit.csv"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit_df.to_csv(audit_path, index=False)
     print(f"\nSaved audit CSV to: {audit_path}")
 
@@ -94,7 +97,8 @@ def print_and_save_operator_features(
     experiment_tag = (
         f"{topology}_{operator_side_mode}_{operator_window_mode}_mod_takagi_tf_only"
     )
-    out_path = f"/home/vault/iwi5/iwi5305h/kol_operator_features_{experiment_tag}.csv"
+    out_path = Path(os.environ.get("KOL_OUTPUT_ROOT", "outputs/reproducibility_validation/hydra_v1")) / f"kol_operator_features_{experiment_tag}.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     feat_df.to_csv(out_path, index=False)
     print(f"\nSaved operator features to: {out_path}")

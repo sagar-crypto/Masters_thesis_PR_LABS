@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [{override /dataset: eventbench110}, {override /model: physics_only}, {override /prior: two_ended}, {override /protocol: physics_110}, {override /training: physics}]
+experiment: {id: P110-2E}
+prior: {mode: two_ended, operator_prior_col: d_two_ended_posseq_plus_input_pct, operator_features: []}

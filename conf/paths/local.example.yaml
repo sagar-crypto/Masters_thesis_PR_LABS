@@ -1,0 +1,4 @@
+# Copy values into environment variables; do not add this file to defaults.
+repo_root: ${oc.env:KOL_REPO_ROOT,.}
+data_root: ${oc.env:KOL_DATA_ROOT,${paths.repo_root}/data}
+output_root: ${oc.env:KOL_OUTPUT_ROOT,${paths.repo_root}/outputs/reproducibility_validation/hydra_v1}

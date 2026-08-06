@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [{override /dataset: protect90}, {override /model: bounded_adaptation}, {override /prior: two_ended}, {override /protocol: hybrid_90_afs}, {override /training: bounded}]
+experiment: {id: L90-2E}
+prior: {mode: two_ended, operator_prior_col: d_phys_real_pct, operator_features: []}

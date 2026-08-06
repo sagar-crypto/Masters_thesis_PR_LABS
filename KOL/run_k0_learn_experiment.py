@@ -123,7 +123,7 @@ def main(config: MainConfig) -> None:
             getattr(
                 config.training,
                 "full_labels_path",
-                "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels.csv",
+                os.environ.get("KOL_90KV_LABELS", "data/protect90/labels.csv"),
             )
         )
     elif topology == "hv_double_line_110kv":

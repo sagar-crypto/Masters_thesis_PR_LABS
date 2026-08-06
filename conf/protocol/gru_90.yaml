@@ -1,0 +1,9 @@
+name: gru_90
+cohort_mode: single_fault_start
+window_indices: [10]
+window_length_ms: 60
+step_ms: 5
+expected_rows: 9022
+expected_events: 9022
+aggregation: arithmetic_mean
+

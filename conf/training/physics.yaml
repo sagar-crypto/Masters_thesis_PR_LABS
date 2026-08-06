@@ -1,0 +1,6 @@
+batch_size: null
+epochs: 0
+patience: null
+learning_rate: null
+weight_decay: null
+

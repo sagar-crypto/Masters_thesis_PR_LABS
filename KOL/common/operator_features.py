@@ -53,24 +53,62 @@ def load_operator_inputs_if_enabled(
     if len(merged) != len(labels_df_used):
         raise RuntimeError("Operator merge changed row count unexpectedly.")
 
-    if "d_phys_real_pct" not in merged.columns:
-        raise ValueError("Missing column 'd_phys_real_pct' in operator file.")
+    prior_col = str(
+        getattr(config.training, "operator_prior_col", "d_phys_real_pct")
+    )
 
-    d_phys_prior = merged["d_phys_real_pct"].astype(np.float32).to_numpy()
-
-    if np.isnan(d_phys_prior).any():
-        missing_mask = np.isnan(d_phys_prior)
-        preview_cols = ["sample_id"]
-        if "window_idx" in merged.columns:
-            preview_cols.append("window_idx")
-        missing_preview = merged.loc[missing_mask, preview_cols].head(10)
+    if prior_col not in merged.columns:
         raise ValueError(
-            f"NaN values found in d_phys_real_pct after merge. "
-            f"Missing rows: {int(missing_mask.sum())}/{len(merged)}. "
-            f"Example missing keys:\n{missing_preview.to_string(index=False)}"
+            f"Missing configured operator prior column '{prior_col}' "
+            "in operator file."
         )
 
-    d_phys_prior = d_phys_prior / 100.0
+    d_phys_prior_pct = pd.to_numeric(
+        merged[prior_col],
+        errors="coerce",
+    ).to_numpy(dtype=np.float32)
+
+    if not np.isfinite(d_phys_prior_pct).all():
+        missing_mask = ~np.isfinite(d_phys_prior_pct)
+
+        preview_cols = ["sample_id"]
+
+        if "window_idx" in merged.columns:
+            preview_cols.append("window_idx")
+
+        missing_preview = merged.loc[
+            missing_mask,
+            preview_cols,
+        ].head(10)
+
+        raise ValueError(
+            f"Non-finite values found in configured prior column "
+            f"'{prior_col}' after merge. "
+            f"Rows: {int(missing_mask.sum())}/{len(merged)}. "
+            f"Example keys:\n{missing_preview.to_string(index=False)}"
+        )
+
+    # The existing KOL training code works on normalized distances in [roughly 0, 1].
+    # The raw CSV stays in percentage points; only the value supplied to the
+    # neural model is divided by 100 here.
+    d_phys_prior = d_phys_prior_pct / 100.0
+
+    # The final GRU-only and learned-fusion methods must not use historical
+    # one-ended / Takagi / modified-Takagi feature columns.
+    #
+    # They receive:
+    #   - waveform sequence through the normal dataset path
+    #   - d_phys_prior through the dedicated prior input
+    #
+    # For gru_only, d_phys_prior is loaded only to keep the exact same
+    # selected-window subset as the fusion run. The GRU-only model will not
+    # use it in its forward pass.
+    kol_model_mode = str(
+        getattr(config.training, "kol_model_mode", "legacy_residual")
+    ).lower().strip()
+
+    if kol_model_mode in {"gru_only", "learned_fusion"}:
+        return d_phys_prior, None, []
 
     configured_cols = getattr(config.training, "operator_feature_cols", None)
 

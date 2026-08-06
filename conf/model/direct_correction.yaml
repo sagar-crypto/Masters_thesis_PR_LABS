@@ -1,0 +1,7 @@
+family: direct_correction
+class_name: KOLGRUCaseResidualRegressor
+hidden_size: 384
+num_layers: 3
+dropout: 0.2
+formulation: legacy_residual
+

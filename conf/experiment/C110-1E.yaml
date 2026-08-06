@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [{override /dataset: eventbench110}, {override /model: direct_correction}, {override /prior: one_ended}, {override /protocol: hybrid_110_afs}, {override /training: correction}]
+experiment: {id: C110-1E}
+prior: {mode: one_ended, operator_prior_col: d_110kv_line_case_bestmae_input_pct, operator_features: [d_both_diff_real_pct, ratio_V0_V1_local, ratio_V2_V1_local, ratio_I0_I1_local, ratio_I2_I1_local, abs_Z0_app_local, abs_Z2_app_local, ratio_V0_V1_remote, ratio_V2_V1_remote, ratio_I0_I1_remote, ratio_I2_I1_remote, abs_Z0_app_remote, abs_Z2_app_remote]}
