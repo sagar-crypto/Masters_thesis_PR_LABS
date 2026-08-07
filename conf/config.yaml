@@ -20,6 +20,7 @@ paths:
   waveform_root: ${oc.env:KOL_WAVEFORM_ROOT,${paths.data_root}/waveforms}
   model_input_root: ${oc.env:KOL_MODEL_INPUT_ROOT,${paths.data_root}/model_inputs}
   topology_file: ${oc.env:KOL_TOPOLOGY_FILE,${paths.data_root}/topology.json}
+  labels_90_file: ${oc.env:KOL_90KV_LABELS,${paths.data_root}/protect90/labels.csv}
   third_party_root: ${oc.env:KOL_THIRD_PARTY_ROOT,${paths.repo_root}/third_party/dl_fault_repo}
   output_root: ${oc.env:KOL_OUTPUT_ROOT,${paths.repo_root}/outputs/reproducibility_validation/preflight}
 execution:

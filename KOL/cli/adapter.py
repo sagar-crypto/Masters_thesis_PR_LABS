@@ -24,6 +24,9 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
     """Return a complete, resolved legacy config used by the scientific runners."""
     topology = "hv_double_line_90kv" if int(cfg.dataset.voltage_kv) == 90 else "hv_double_line_110kv"
     legacy = _private_base(topology)
+    # The private Hydra tree is composed in struct mode; the compatibility
+    # surface intentionally adds a small set of opt-in canonical keys.
+    OmegaConf.set_struct(legacy, False)
     out = Path(output_dir or str(cfg.paths.output_root)).resolve()
     is_gru = str(cfg.model.family) == "waveform_gru"
     is_physics = str(cfg.model.family) == "physics_only"
@@ -31,7 +34,6 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
         "dataset": {
             "topology": topology,
             "dataset_directory": str(Path(str(cfg.paths.data_root)).resolve()),
-            "windows_local_dir": str(Path(str(cfg.dataset.waveform_path)).resolve()),
         },
         "model": {
             "model_name": "gru_regressor",
@@ -39,6 +41,7 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
             "hidden_size": int(cfg.model.get("hidden_size", 128) or 128),
             "num_layers": int(cfg.model.get("num_layers", 2) or 2),
             "dropout": float(cfg.model.get("dropout", 0.1) or 0.0),
+            "bidirectional": False,
         },
         "training": {
             "target_label": str(cfg.target), "n_splits": int(cfg.folds),
@@ -55,8 +58,23 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
             "kol_model_mode": str(cfg.training.get("kol_model_mode", "gru_only" if is_gru else "legacy_residual")),
             "kol_prediction_mode": str(cfg.training.get("kol_prediction_mode", "plain")),
             "kol_window_mode": str(cfg.protocol.cohort_mode),
-            "line_filter": "Line_1_2_a" if int(cfg.dataset.voltage_kv) == 90 else "MainLn1-2A",
-            "tune_lr_wd": bool(is_gru), "feature_groups_include": ["lines"],
+            "operator_window_mode": str(cfg.protocol.cohort_mode),
+            "operator_side_mode": "both" if str(cfg.prior.mode) == "two_ended" else "default",
+            "line_filter": cfg.training.get("line_filter", None),
+            "tune_lr_wd": False,
+            "feature_groups_include": ["lines", "loads", "winds", "extgrid"],
+            "materialize_feature_filters": False,
+            "input_representation": "waveform",
+            "cv_mode": "group" if is_gru else "stratified_location",
+            "cv_stratify_col": "y_fault_location",
+            "case_emb_dim": int(cfg.model.get("case_embedding", 8) or 8),
+            "fusion_head_hidden_size": int(cfg.model.get("fusion_head", 64) or 64),
+            "bounded_residual_max": float(cfg.model.get("residual_bound", 1.0) or 1.0),
+            "gate_init_bias": float(cfg.model.get("gate_bias", -3.0)),
+            "canonical_expected_rows": int(cfg.protocol.expected_rows),
+            "canonical_expected_events": int(cfg.protocol.expected_events),
+            "canonical_window_indices": cfg.protocol.window_indices,
+            "canonical_hard_audit": True,
             "canonical_experiment_id": str(cfg.experiment.id),
             "canonical_fold": cfg.execution.fold,
             "max_train_batches": cfg.execution.max_train_batches,
@@ -64,6 +82,7 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
             "max_test_batches": cfg.execution.max_test_batches,
         },
         "window_extraction": {
+            "windows_local_dir": str(Path(str(cfg.dataset.waveform_path)).resolve()),
             "window_length": float(cfg.protocol.window_length_ms) / 1000.0,
             "step_length_seconds": float(cfg.protocol.step_ms) / 1000.0,
         },

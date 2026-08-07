@@ -1,3 +1,4 @@
 # @package _global_
 defaults: [{override /dataset: eventbench110}, {override /model: waveform_gru}, {override /prior: none}, {override /protocol: gru_110}, {override /training: gru}]
 experiment: {id: G110}
+training: {learning_rate: 0.001, weight_decay: 0.001}

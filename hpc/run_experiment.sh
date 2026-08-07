@@ -7,7 +7,7 @@
 #SBATCH --partition=v100
 #SBATCH --output=./hpc/hpc_logs/%x-%j-on-%N.out
 #SBATCH --error=./hpc/hpc_logs/%x-%j-on-%N.err
-#SBATCH --export=NONE
+#SBATCH --export=ALL
 
 # Run any canonical experiment through the Hydra configuration in conf/.
 #
@@ -25,8 +25,6 @@
 # unchanged to Hydra, allowing configuration changes without another job file.
 
 set -eo pipefail
-unset SLURM_EXPORT_ENV
-
 EXPERIMENT="${1:-L110-1E}"
 MODE="${2:-full}"
 
@@ -70,19 +68,53 @@ module load python/3.12-conda
 source /home/hpc/iwi5/iwi5305h/miniconda3/etc/profile.d/conda.sh
 conda activate Masters_thesis_env_py312
 
-export KOL_REPO_ROOT="$PROJECT_DIR"
+export KOL_REPO_ROOT="${KOL_REPO_ROOT:-$PROJECT_DIR}"
+export KOL_OUTPUT_ROOT="${KOL_OUTPUT_ROOT:-$KOL_REPO_ROOT/outputs/reproducibility_validation/hpc}"
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE=disabled
 
+require_dir() {
+    local name="$1" value="${!1:-}"
+    if [[ -z "$value" || ! -d "$value" ]]; then
+        echo "$name must name an existing directory (got: ${value:-unset})" >&2
+        exit 2
+    fi
+}
+
+require_file() {
+    local name="$1" value="${!1:-}"
+    if [[ -z "$value" || ! -f "$value" ]]; then
+        echo "$name must name an existing file (got: ${value:-unset})" >&2
+        exit 2
+    fi
+}
+
+require_dir KOL_REPO_ROOT
+require_dir KOL_DATA_ROOT
+require_dir KOL_WAVEFORM_ROOT
+case "$EXPERIMENT" in
+    C*|L*) require_dir KOL_MODEL_INPUT_ROOT ;;
+    P110*) require_file KOL_TOPOLOGY_FILE ;;
+    P90*) require_file KOL_90KV_LABELS ;;
+esac
+
 case "$MODE" in
     validate)
-        python -m KOL.cli.validate "experiment=$EXPERIMENT" "$@"
+        python -m KOL.cli.validate --check-files "experiment=$EXPERIMENT" "$@"
         ;;
     smoke)
-        python -m KOL.cli.train --fold 0 "experiment=$EXPERIMENT" "$@"
+        case "$EXPERIMENT" in
+            P*) python -m KOL.cli.physics "experiment=$EXPERIMENT" "$@" ;;
+            *) python -m KOL.cli.train --fold 0 --max-epochs 1 \
+                --max-train-batches 2 --max-val-batches 2 --max-test-batches 2 \
+                --disable-tracking "experiment=$EXPERIMENT" "$@" ;;
+        esac
         ;;
     full)
-        python -m KOL.cli.train "experiment=$EXPERIMENT" "$@"
+        case "$EXPERIMENT" in
+            P*) python -m KOL.cli.physics "experiment=$EXPERIMENT" "$@" ;;
+            *) python -m KOL.cli.train "experiment=$EXPERIMENT" "$@" ;;
+        esac
         ;;
 esac
 

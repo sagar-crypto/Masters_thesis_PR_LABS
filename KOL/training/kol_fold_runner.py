@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from itertools import islice
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,27 @@ from KOL.training.kol_residual_train import (
     train_kol_case_k0,
     train_learned_fusion,
 )
+
+
+class _LimitedLoader:
+    def __init__(self, loader, maximum):
+        self.loader = loader
+        self.maximum = int(maximum)
+        if self.maximum < 0:
+            raise ValueError("batch limits must be non-negative")
+
+    def __iter__(self):
+        return islice(iter(self.loader), self.maximum)
+
+    def __len__(self):
+        return min(len(self.loader), self.maximum)
+
+    def __getattr__(self, name):
+        return getattr(self.loader, name)
+
+
+def _limit_loader(loader, maximum):
+    return loader if maximum is None else _LimitedLoader(loader, maximum)
 
 
 def _build_checkpoint_path(
@@ -75,6 +97,7 @@ def _save_outputs_for_fold(
     idx_train: np.ndarray,
     idx_val: np.ndarray,
     idx_test: np.ndarray,
+    idx_test_predictions: np.ndarray | None,
     labels_df_used,
     y_true_np: np.ndarray,
     y_pred_np: np.ndarray,
@@ -169,7 +192,7 @@ def _save_outputs_for_fold(
         pred_path = save_fold_predictions(
             out_dir=run_out_dir,
             fold_idx=fold_idx,
-            idx_test=idx_test,
+            idx_test=idx_test if idx_test_predictions is None else idx_test_predictions,
             labels_df=labels_df_used,
             y_true=y_true_np,
             y_pred=y_pred_np,
@@ -266,6 +289,10 @@ def run_one_fold(
         split_seed=int(config.training.split_seed) + int(fold_idx),
     )
 
+    max_train_batches = getattr(config.training, "max_train_batches", None)
+    max_val_batches = getattr(config.training, "max_val_batches", None)
+    max_test_batches = getattr(config.training, "max_test_batches", None)
+
     logger.info(
         "[fold %d/%d] split sizes: train=%d | val=%d | test=%d",
         fold_idx + 1,
@@ -323,6 +350,10 @@ def run_one_fold(
             flattened_dim=int(flat_dim),
             out_dim=int(out_dim),
         ).to(device)
+
+        train_loader = _limit_loader(train_loader, max_train_batches)
+        val_loader = _limit_loader(val_loader, max_val_batches)
+        test_loader = _limit_loader(test_loader, max_test_batches)
 
         optimizer = torch.optim.AdamW(
             model.parameters(),
@@ -450,6 +481,9 @@ def run_one_fold(
             )
 
         logger.info("op_features is None: %s", op_features is None)
+        train_loader = _limit_loader(train_loader, max_train_batches)
+        val_loader = _limit_loader(val_loader, max_val_batches)
+        test_loader = _limit_loader(test_loader, max_test_batches)
         if op_features is not None:
             logger.info("op_features shape: %s", op_features.shape)
             logger.info("n_op_features passed to model: %d", int(op_features.shape[1]))
@@ -710,6 +744,10 @@ def run_one_fold(
 
             y_score_np = residual_np
 
+    # A capped test loader emits a prefix of the sampler's ordered indices.
+    # Keep artifact metadata aligned with that partial prediction vector.
+    idx_test_predictions = test_idx[: len(y_true_np)]
+
     if not eval_only or resave_eval_only:
         _save_outputs_for_fold(
             config=config,
@@ -729,6 +767,7 @@ def run_one_fold(
             idx_train=idx_train,
             idx_val=idx_val,
             idx_test=test_idx,
+            idx_test_predictions=idx_test_predictions,
             labels_df_used=labels_df_used,
             y_true_np=y_true_np,
             y_pred_np=y_pred_np,
@@ -754,6 +793,6 @@ def run_one_fold(
         "fold": int(fold_idx),
         "n_train": int(len(idx_train)),
         "n_val": int(len(idx_val)),
-        "n_test": int(len(test_idx)),
+        "n_test": int(len(idx_test_predictions)),
         **{f"test/{k}": float(v) for k, v in test_metrics.items()},
     }

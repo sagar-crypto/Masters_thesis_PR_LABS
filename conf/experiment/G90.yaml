@@ -1,3 +1,4 @@
 # @package _global_
 defaults: [{override /dataset: protect90}, {override /model: waveform_gru}, {override /prior: none}, {override /protocol: gru_90}, {override /training: gru}]
 experiment: {id: G90}
+training: {learning_rate: 0.0001, weight_decay: 0.0001}
