@@ -73,7 +73,11 @@ def load_and_filter_operator_data(
     print(f"Loaded X_valid shape: {X_valid.shape}")
     print(f"labels_df_used shape: {labels_df_used.shape}")
 
-    line_filter = None
+    line_filter = getattr(config.training, "line_filter", None)
+
+    if line_filter is not None and str(line_filter).strip() == "":
+        line_filter = None
+
     loc_min = None
     loc_max = None
 
