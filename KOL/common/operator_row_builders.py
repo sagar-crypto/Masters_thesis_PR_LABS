@@ -95,6 +95,86 @@ def build_single_side_operator_row(
     return row_out, None
 
 
+def build_two_ended_posseq_operator_row(
+    *,
+    row: pd.Series,
+    x_raw_full: np.ndarray,
+    feature_names: list[str],
+    topology: str,
+    fs: float,
+    f_nom: float,
+    y_col: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Build one raw synchronized two-ended positive-sequence operator row.
+
+    This function deliberately uses only:
+        compute_two_ended_posseq_distance_pct(..., current_sign=+1)
+
+    It does not compute one-ended apparent impedance, Takagi,
+    modified-Takagi, or historical fusion features.
+    """
+    try:
+        r1, x1, r0, x0, line_len_km = get_line_params_for_row(
+            row=row,
+            topology=topology,
+        )
+    except Exception as exc:
+        return None, f"line_parameter_error: {type(exc).__name__}"
+
+    if line_len_km <= 1e-12:
+        return None, "invalid_line_length"
+
+    try:
+        x_vi_local, used_local = extract_line_vi_channels(
+            x_raw=x_raw_full,
+            feature_names=feature_names,
+            fault_line=str(row["y_fault_line"]),
+            side_mode="default",
+        )
+
+        x_vi_remote, used_remote = extract_line_vi_channels(
+            x_raw=x_raw_full,
+            feature_names=feature_names,
+            fault_line=str(row["y_fault_line"]),
+            side_mode="opposite",
+        )
+
+    except Exception as exc:
+        return None, f"channel_mapping_error: {type(exc).__name__}"
+
+    d_two_ended_pct, reason = compute_two_ended_posseq_distance_pct(
+        x_vi_local=x_vi_local,
+        x_vi_remote=x_vi_remote,
+        fs=fs,
+        f_nom=float(f_nom),
+        r1=r1,
+        x1=x1,
+        current_sign=+1,
+    )
+
+    row_out: dict[str, Any] = {
+        "sample_id": row["sample_id"],
+        "window_idx": row["window_idx"],
+        "status": row["status"],
+        "dt_start": float(row["dt_start"]),
+        "y_fault_line": row["y_fault_line"],
+        "y_fault_location": float(row[y_col]),
+        "r1": r1,
+        "x1": x1,
+        "r0": r0,
+        "x0": x0,
+        "line_len_km": line_len_km,
+        "operator_side_mode": "two_ended_posseq",
+        "used_sides": " | ".join(used_local + used_remote),
+        "current_sign": +1,
+        "d_two_ended_posseq_plus_pct": d_two_ended_pct,
+        "two_ended_posseq_plus_reason": reason,
+    }
+
+    return row_out, None
+
+
 def build_both_side_operator_row(
     *,
     row: pd.Series,
