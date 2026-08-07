@@ -1,0 +1,8 @@
+name: physics_90
+cohort_mode: all_fault_start
+window_indices: [8, 9, 10, 11, 12]
+window_length_ms: 60
+step_ms: 5
+expected_rows: 40564
+expected_events: 9022
+aggregation: arithmetic_mean

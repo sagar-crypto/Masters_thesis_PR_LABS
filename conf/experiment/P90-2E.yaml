@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [{override /dataset: protect90}, {override /model: physics_only}, {override /prior: two_ended}, {override /protocol: physics_90}, {override /training: physics}]
+experiment: {id: P90-2E}
+prior: {mode: two_ended, operator_prior_col: d_phys_real_pct, operator_features: []}

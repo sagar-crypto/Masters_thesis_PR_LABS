@@ -1,0 +1,38 @@
+defaults:
+  - _self_
+  - dataset: protect90
+  - model: physics_only
+  - prior: none
+  - protocol: physics_90
+  - training: physics
+  - experiment: null
+
+experiment:
+  id: P90-1E
+seed: 42
+folds: 5
+target: y_fault_location
+group_column: sample_id
+validation_fraction: 0.15
+paths:
+  repo_root: ${oc.env:KOL_REPO_ROOT,.}
+  data_root: ${oc.env:KOL_DATA_ROOT,${paths.repo_root}/data}
+  waveform_root: ${oc.env:KOL_WAVEFORM_ROOT,${paths.data_root}/waveforms}
+  model_input_root: ${oc.env:KOL_MODEL_INPUT_ROOT,${paths.data_root}/model_inputs}
+  topology_file: ${oc.env:KOL_TOPOLOGY_FILE,${paths.data_root}/topology.json}
+  labels_90_file: ${oc.env:KOL_90KV_LABELS,${paths.data_root}/protect90/labels.csv}
+  third_party_root: ${oc.env:KOL_THIRD_PARTY_ROOT,${paths.repo_root}/third_party/dl_fault_repo}
+  output_root: ${oc.env:KOL_OUTPUT_ROOT,${paths.repo_root}/outputs/reproducibility_validation/preflight}
+execution:
+  fold: null
+  max_epochs: null
+  max_train_batches: null
+  max_val_batches: null
+  max_test_batches: null
+  disable_tracking: false
+  evaluate_only: false
+hydra:
+  run:
+    dir: ${paths.output_root}/${experiment.id}/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    chdir: false

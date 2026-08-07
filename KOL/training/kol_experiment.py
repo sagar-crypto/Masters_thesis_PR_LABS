@@ -17,6 +17,7 @@ from dl_psp.utils.run_utils import (
 from KOL.common.cases import build_case_index
 from KOL.common.constants import CASE_TO_IDX
 from KOL.common.cv_utils import (
+    audit_cohort,
     build_cv_splits_stratified,
     canonicalize_multiclass_encoding,
     select_best_lr_wd,
@@ -411,6 +412,17 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         stratify_col=cv_stratify_col,
     )
 
+    if bool(getattr(config.training, "canonical_hard_audit", False)):
+        audit_cohort(
+            labels_df_used,
+            splits,
+            expected_rows=int(config.training.canonical_expected_rows),
+            expected_events=int(config.training.canonical_expected_events),
+            expected_folds=n_splits,
+            expected_windows=getattr(config.training, "canonical_window_indices", None),
+            prior_values=d_phys_prior,
+        )
+
     best_lr, best_wd, eval_only, resave_eval_only = select_best_lr_wd(
         config=config,
         X_used=X_used_filtered,
@@ -451,6 +463,9 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
     include_groups = config.training.feature_groups_include
 
     for fold_idx, (train_pool_idx, test_idx) in enumerate(splits, start=0):
+        requested_fold = getattr(config.training, "canonical_fold", None)
+        if requested_fold is not None and int(requested_fold) != fold_idx:
+            continue
         metrics_row = run_one_fold(
             fold_idx=fold_idx,
             n_splits=n_splits,

@@ -199,6 +199,15 @@ cython_debug/
 #  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
+
+# Local research data, checkpoints, and noncanonical path overrides
+data/
+checkpoints/
+*.ckpt
+*.pt
+conf/paths/local.yaml
+conf/paths/hpc.yaml
+outputs/reproducibility_validation/
 .cursorindexingignore
 
 # Marimo
@@ -210,3 +219,5 @@ __marimo__/
 *.out
 outputs/*
 thesis_evidence
+dataset_insights_plots
+figures

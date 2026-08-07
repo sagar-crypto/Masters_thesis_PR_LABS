@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, cast
 
 import numpy as np
@@ -81,7 +82,7 @@ def load_and_filter_operator_data(
     loc_max = None
 
     if topology == "hv_double_line_90kv":
-        full_labels_path = "/home/vault/iwi5/iwi5305h/new_dataset_90kv/labels.csv"
+        full_labels_path = os.environ.get("KOL_90KV_LABELS", "data/protect90/labels.csv")
     elif topology == "hv_double_line_110kv":
         full_labels_path = None
     else:

@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [{override /dataset: eventbench110}, {override /model: direct_correction}, {override /prior: two_ended}, {override /protocol: hybrid_110_afs}, {override /training: correction}]
+experiment: {id: C110-2E}
+prior: {mode: two_ended, operator_prior_col: d_two_ended_posseq_plus_input_pct, operator_features: []}

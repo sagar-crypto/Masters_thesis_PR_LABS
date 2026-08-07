@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
+from typing import Iterable, Sequence
 from typing import Optional
 
 import numpy as np
@@ -10,6 +12,78 @@ from sklearn.model_selection import GroupKFold, StratifiedGroupKFold
 from psp_helper.config import MainConfig
 
 from dl_psp.utils.tuning_utils import tune_lr_wd_on_single_fold
+
+
+class CohortAuditError(ValueError):
+    """Raised when prepared data does not match the canonical protocol."""
+
+
+@dataclass(frozen=True)
+class CohortAudit:
+    rows: int
+    events: int
+    folds: int
+    windows: list[int] | None
+
+
+def audit_cohort(
+    labels: pd.DataFrame,
+    splits: Iterable[tuple[Sequence[int], Sequence[int]]],
+    *,
+    expected_rows: int,
+    expected_events: int,
+    expected_folds: int = 5,
+    group_column: str = "sample_id",
+    expected_windows: Sequence[int] | None = None,
+    prior_values=None,
+    prior_column: str | None = None,
+    operator_columns: Sequence[str] = (),
+) -> CohortAudit:
+    if group_column not in labels.columns:
+        raise CohortAuditError(f"missing group column: {group_column}")
+    rows = len(labels)
+    events = int(labels[group_column].nunique(dropna=False))
+    if rows != int(expected_rows):
+        raise CohortAuditError(f"cohort rows mismatch: expected {expected_rows}, observed {rows}")
+    if events != int(expected_events):
+        raise CohortAuditError(f"cohort events mismatch: expected {expected_events}, observed {events}")
+
+    required = ([prior_column] if prior_column else []) + list(operator_columns)
+    missing = [name for name in required if name not in labels.columns]
+    if missing:
+        raise CohortAuditError(f"missing operator columns: {missing}")
+    if prior_values is not None and not np.isfinite(np.asarray(prior_values, dtype=float)).all():
+        raise CohortAuditError("prepared prior contains non-finite values")
+
+    observed_windows = None
+    if expected_windows is not None:
+        if "window_idx" not in labels.columns:
+            raise CohortAuditError("configured window indices but window_idx is missing")
+        observed_windows = sorted(map(int, pd.unique(labels["window_idx"])))
+        wanted = sorted(map(int, expected_windows))
+        if observed_windows != wanted:
+            raise CohortAuditError(f"window set mismatch: expected {wanted}, observed {observed_windows}")
+
+    split_list = list(splits)
+    if len(split_list) != int(expected_folds):
+        raise CohortAuditError(f"outer folds mismatch: expected {expected_folds}, observed {len(split_list)}")
+    all_rows = set(range(rows))
+    test_counts = np.zeros(rows, dtype=np.int16)
+    group_fold_counts = {}
+    for fold, (train, test) in enumerate(split_list):
+        train_set, test_set = set(map(int, train)), set(map(int, test))
+        if not train_set or not test_set or train_set | test_set != all_rows or train_set & test_set:
+            raise CohortAuditError(f"fold {fold} is not a complete disjoint outer split")
+        if set(labels.iloc[list(train_set)][group_column]) & set(labels.iloc[list(test_set)][group_column]):
+            raise CohortAuditError(f"sample_id crosses train/test boundary in fold {fold}")
+        test_counts[list(test_set)] += 1
+        for group in pd.unique(labels.iloc[np.asarray(test, dtype=int)][group_column]):
+            group_fold_counts.setdefault(group, set()).add(fold)
+    if not np.all(test_counts == 1):
+        raise CohortAuditError("each row/sample_id must occur in exactly one outer test fold")
+    if any(len(v) != 1 for v in group_fold_counts.values()) or len(group_fold_counts) != events:
+        raise CohortAuditError("each sample_id must belong to exactly one outer test fold")
+    return CohortAudit(rows, events, len(split_list), observed_windows)
 
 
 def split_train_val_from_train_pool(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -10,6 +12,7 @@ from psp_helper.config import MainConfig
 from config import GRAPH_PATH
 
 from KOL.common.operator_audit import audit_case_and_formula_mapping
+from KOL.common.cv_utils import audit_cohort
 from KOL.common.operator_data_prep import (
     apply_operator_window_selection,
     load_and_filter_operator_data,
@@ -33,7 +36,8 @@ def run_formula_audit(
         max_print=40,
     )
 
-    audit_path = "/home/vault/iwi5/iwi5305h/run_kol_formula_audit.csv"
+    audit_path = Path(os.environ.get("KOL_OUTPUT_ROOT", "outputs/reproducibility_validation/hydra_v1")) / "run_kol_formula_audit.csv"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
     audit_df.to_csv(audit_path, index=False)
     print(f"\nSaved audit CSV to: {audit_path}")
 
@@ -47,6 +51,7 @@ def print_and_save_operator_features(
     topology: str,
     operator_side_mode: str,
     operator_window_mode: str,
+    output_root: str | None = None,
 ) -> pd.DataFrame:
     feat_df = pd.DataFrame(rows)
 
@@ -99,7 +104,8 @@ def print_and_save_operator_features(
     experiment_tag = (
         f"{topology}_{line_tag}_{operator_side_mode}_{operator_window_mode}"
     )
-    out_path = f"/home/vault/iwi5/iwi5305h/kol_operator_features_{experiment_tag}.csv"
+    out_path = Path(output_root or os.environ.get("KOL_OUTPUT_ROOT", "outputs/reproducibility_validation/hydra_v1")) / f"kol_operator_features_{experiment_tag}.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     feat_df.to_csv(out_path, index=False)
     print(f"\nSaved operator features to: {out_path}")
@@ -119,6 +125,20 @@ def export_operator_features(config: MainConfig) -> pd.DataFrame:
         fs=fs,
         f_nom=f_nom,
     )
+
+    if bool(getattr(config.training, "canonical_hard_audit", False)):
+        from sklearn.model_selection import GroupKFold
+
+        groups = df["sample_id"].to_numpy()
+        splits = list(GroupKFold(n_splits=int(config.training.n_splits)).split(df, groups=groups))
+        audit_cohort(
+            df,
+            splits,
+            expected_rows=int(config.training.canonical_expected_rows),
+            expected_events=int(config.training.canonical_expected_events),
+            expected_folds=int(config.training.n_splits),
+            expected_windows=getattr(config.training, "canonical_window_indices", None),
+        )
 
     feature_names = list(meta["feature_names"])
 
@@ -198,4 +218,5 @@ def export_operator_features(config: MainConfig) -> pd.DataFrame:
         topology=topology,
         operator_side_mode=operator_side_mode,
         operator_window_mode=operator_window_mode,
+        output_root=str(getattr(config.training, "out_dir", "outputs/reproducibility_validation/hydra_v1")),
     )

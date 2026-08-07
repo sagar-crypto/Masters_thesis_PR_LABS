@@ -1,0 +1,5 @@
+partition: ${oc.env:KOL_SLURM_PARTITION,gpu}
+gres: gpu:v100:1
+cpus_per_task: 8
+mem_gb: 64
+time: '24:00:00'

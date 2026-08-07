@@ -1,0 +1,4 @@
+# @package _global_
+defaults: [{override /dataset: protect90}, {override /model: direct_correction}, {override /prior: one_ended}, {override /protocol: hybrid_90_afs}, {override /training: correction}]
+experiment: {id: C90-1E}
+prior: {mode: one_ended, operator_prior_col: d_90kv_afs_case_bestmae_input_pct, operator_features: [ratio_V0_V1, ratio_V2_V1, ratio_I0_I1, ratio_I2_I1, abs_Z0_app, abs_Z2_app]}

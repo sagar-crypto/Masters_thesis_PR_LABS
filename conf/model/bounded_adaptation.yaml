@@ -1,0 +1,10 @@
+family: bounded_adaptation
+class_name: KOLGRUBoundedResidualFusionRegressor
+hidden_size: 64
+num_layers: 1
+dropout: 0.0
+case_embedding: 8
+fusion_head: 64
+residual_bound: 1.0
+gate_bias: -3.0
+

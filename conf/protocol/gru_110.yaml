@@ -1,0 +1,8 @@
+name: gru_110
+cohort_mode: all_fault_start
+window_indices: null
+window_length_ms: 60
+step_ms: 5
+expected_rows: 14736
+expected_events: 924
+aggregation: arithmetic_mean

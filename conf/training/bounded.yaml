@@ -1,0 +1,9 @@
+batch_size: 64
+epochs: 150
+patience: 20
+learning_rate: 0.0003
+weight_decay: 0.0001
+kol_model_mode: bounded_residual_fusion
+kol_prediction_mode: threeph_add_ground_mul
+operator_prior_col: ${prior.operator_prior_col}
+
