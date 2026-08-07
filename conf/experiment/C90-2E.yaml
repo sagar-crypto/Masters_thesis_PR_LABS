@@ -1,4 +1,4 @@
 # @package _global_
 defaults: [{override /dataset: protect90}, {override /model: direct_correction}, {override /prior: two_ended}, {override /protocol: hybrid_90_afs}, {override /training: correction}]
 experiment: {id: C90-2E}
-prior: {mode: two_ended, operator_prior_col: d_phys_real_pct, operator_features: []}
+prior: {mode: two_ended, operator_prior_col: d_90kv_afs_two_ended_posseq_input_pct, operator_features: []}

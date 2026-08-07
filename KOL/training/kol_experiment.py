@@ -451,6 +451,9 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
     include_groups = config.training.feature_groups_include
 
     for fold_idx, (train_pool_idx, test_idx) in enumerate(splits, start=0):
+        requested_fold = getattr(config.training, "canonical_fold", None)
+        if requested_fold is not None and int(requested_fold) != fold_idx:
+            continue
         metrics_row = run_one_fold(
             fold_idx=fold_idx,
             n_splits=n_splits,

@@ -18,7 +18,12 @@ logger = get_logger(__name__)
     config_name="main-config.yaml",
 )
 def main(config: MainConfig) -> None:
-    run_kol_cv_experiment(config=config, logger=logger)
+    run(config)
+
+
+def run(config: MainConfig):
+    """Callable entry point retained alongside the archival Hydra CLI."""
+    return run_kol_cv_experiment(config=config, logger=logger)
 
 
 if __name__ == "__main__":

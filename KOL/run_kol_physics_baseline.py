@@ -12,7 +12,12 @@ from KOL.common.operator_export import export_operator_features
     config_name="main-config.yaml",
 )
 def main(config: MainConfig) -> None:
-    export_operator_features(config)
+    run(config)
+
+
+def run(config: MainConfig):
+    """Callable entry point retained alongside the archival Hydra CLI."""
+    return export_operator_features(config)
 
 
 if __name__ == "__main__":

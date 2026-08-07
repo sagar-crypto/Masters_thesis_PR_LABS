@@ -51,7 +51,7 @@ def git_value(*args: str) -> str:
 
 
 def package_versions() -> dict[str, str]:
-    names = ("hydra-core", "omegaconf", "numpy", "pandas", "torch", "scikit-learn")
+    names = ("hydra-core", "omegaconf", "numpy", "pandas", "torch", "scikit-learn", "wandb", "networkx", "pyarrow")
     values = {}
     for name in names:
         try:
@@ -94,6 +94,9 @@ def require_private_dependency(cfg: DictConfig) -> None:
     root = Path(str(cfg.paths.third_party_root))
     if not root.exists():
         raise RuntimeError("Private dl_fault_repo submodule unavailable; run git submodule update --init --recursive")
+    src = str(root / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
     try:
         __import__("dl_psp")
         __import__("psp_helper")
@@ -107,7 +110,7 @@ def validate_metadata(cfg: DictConfig) -> list[str]:
         errors.append("canonical split metadata differs from five folds, seed 42, grouped sample_id")
     if cfg.protocol.aggregation != "arithmetic_mean":
         errors.append("event aggregation is not arithmetic_mean")
-    if not str(cfg.paths.output_root).endswith("outputs/reproducibility_validation/hydra_v1"):
+    if "outputs/reproducibility_validation/" not in str(cfg.paths.output_root):
         errors.append("output root is outside the canonical isolated root")
     if cfg.prior.mode == "two_ended" and cfg.prior.operator_features:
         errors.append("two-ended prior must not include auxiliary operator features")
