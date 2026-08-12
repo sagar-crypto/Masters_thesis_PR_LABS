@@ -22,4 +22,6 @@ jobs:
 
           git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@git5.cs.fau.de/si69koni/fault-localization-using-known-operator-learning.git
 
-          git push gitlab HEAD:refs/heads/github-sync --force-with-lease
+          git fetch gitlab refs/heads/github-sync:refs/remotes/gitlab/github-sync || true
+
+          git push gitlab HEAD:refs/heads/github-sync --force-with-lease=refs/heads/github-sync:refs/remotes/gitlab/github-sync
