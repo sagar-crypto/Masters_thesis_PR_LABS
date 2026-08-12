@@ -181,11 +181,16 @@ class KOLDualGRUCaseResidualRegressor(nn.Module):
         return residual
 
 class KOLGRUBoundedResidualFusionRegressor(nn.Module):
-    """Case-aware bounded residual model using an existing KOL rule.
+    """Predict a gated, case-aware bounded correction to a physics prior.
 
-    The GRU predicts a gated residual signal. The final prediction is created
-    using apply_kol_prediction_rule_unclipped, so modes such as
-    threeph_add_ground_mul are actually applied.
+    Inputs use normalized fault distance: waveform ``(batch, time, features)``,
+    prior ``(batch,)``, integer fault-case IDs, and optional operator features.
+    A GRU representation, prior, case embedding, and normalized operator vector
+    feed shared residual/gate heads. ``tanh`` bounds the proposal to
+    ``[-residual_max, residual_max]`` and a sigmoid gate attenuates it. The
+    configured KOL rule decides whether that residual is additive or
+    multiplicative for each fault family. Forward returns clipped prediction,
+    unclipped prediction for loss, effective residual, and gate diagnostics.
     """
 
     def __init__(
@@ -250,8 +255,6 @@ class KOLGRUBoundedResidualFusionRegressor(nn.Module):
             )
         else:
             self.op_norm = None
-
-        # Inputs:
 
         # Inputs:
         # GRU hidden state
@@ -436,11 +439,16 @@ def apply_kol_prediction_rule_unclipped(
     residual: torch.Tensor,
     mode: str = "ground_only_mul",
 ) -> torch.Tensor:
-    """
-    Same correction rule as apply_kol_prediction_rule, but without final clipping.
+    """Apply the configured case-aware correction without output clipping.
 
-    This is useful for training loss because the model should be penalized
-    if the raw prediction goes below 0 or above 1.
+    ``d_phys_prior`` and additive residual terms use normalized line distance
+    (0--1), while multiplicative branches treat the residual as a relative
+    correction. ``case_idx`` selects ground, three-phase, and line-line branches;
+    modes intentionally leave unlisted cases at the prior. Keeping the raw result
+    allows training loss to penalize predictions outside the physical interval.
+
+    Returns:
+        A tensor shaped like ``d_phys_prior``. Unknown modes raise ``ValueError``.
     """
     mode = str(mode).lower().strip()
 
@@ -727,10 +735,12 @@ def apply_kol_prediction_rule(
     residual: torch.Tensor,
     mode: str = "ground_only_mul",
 ) -> torch.Tensor:
-    """
-    Final prediction rule used for evaluation/output.
+    """Apply the KOL correction and clip final normalized distances to [0, 1].
 
-    This version clips predictions to the valid normalized fault-location range [0, 1].
+    Training can use :func:`apply_kol_prediction_rule_unclipped` for an
+    out-of-range penalty; evaluation and exported predictions use this bounded
+    form. Inputs and case-dependent additive/multiplicative semantics are
+    otherwise identical.
     """
     pred = apply_kol_prediction_rule_unclipped(
         d_phys_prior=d_phys_prior,

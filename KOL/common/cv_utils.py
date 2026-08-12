@@ -39,6 +39,28 @@ def audit_cohort(
     prior_column: str | None = None,
     operator_columns: Sequence[str] = (),
 ) -> CohortAudit:
+    """Verify the prepared cohort and grouped outer-fold partition.
+
+    Args:
+        labels: Row-aligned metadata in the prepared model-input coordinate
+            system (after all topology and window filters).
+        splits: ``(train, test)`` positional indices into ``labels``.
+        expected_rows: Required number of prepared windows/rows.
+        expected_events: Required number of unique event groups.
+        expected_folds: Required number of outer folds.
+        group_column: Event identity column; events may not cross a fold boundary.
+        expected_windows: Exact accepted ``window_idx`` set, when constrained.
+        prior_values: Optional row-aligned prior values checked for finiteness.
+        prior_column: Optional prior column required in ``labels``.
+        operator_columns: Additional required operator columns.
+
+    Returns:
+        Observed row, event, fold, and window counts.
+
+    Raises:
+        CohortAuditError: If counts, columns, priors, fold coverage, disjointness,
+            or event grouping differ from the canonical protocol.
+    """
     if group_column not in labels.columns:
         raise CohortAuditError(f"missing group column: {group_column}")
     rows = len(labels)

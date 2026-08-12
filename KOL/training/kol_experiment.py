@@ -200,6 +200,29 @@ def _aggregate_and_save_metrics(
 
 
 def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
+    """Run the complete audited cross-validation workflow.
+
+    The function prepares a compact filtered row coordinate system, aligns any
+    operator prior/features to it, validates the effective waveform dimensions,
+    derives grouped outer splits, and dispatches each requested fold. Split and
+    tuning indices are positional in this compact system; ``valid_row_idx`` is
+    retained only as provenance back to the original waveform bank. Evaluation-
+    only behavior is selected by the existing tuning/config helper and delegated
+    unchanged to the fold runner.
+
+    Args:
+        config: Private-schema experiment configuration.
+        logger: Logger for preparation, audit, training, and artifact messages.
+
+    Returns:
+        One row of test metrics per executed fold, also persisted as the CV
+        summary. A configured single-fold run therefore returns one row.
+
+    Raises:
+        ValueError: If model/prior modes, tensors, or canonical audits disagree.
+        RuntimeError: If no training seed is configured.
+    """
+    # Phase 1: load/filter data and establish the compact row coordinate system.
     set_torch_perf_flags()
 
     device = get_device()
@@ -249,6 +272,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
 
     groups_used = labels_df_used[L.SAMPLE_ID]
 
+    # Phase 2: align priors/features and derive targets in exactly that row order.
     (
         labels_df_used,
         d_phys_prior,
@@ -290,6 +314,26 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         out_dim = 1
 
     T, F_eff, flat_dim = infer_input_dims(X_used_filtered, feature_indices_for_ds)
+
+    expected_timesteps = int(
+        getattr(config.training, "canonical_expected_timesteps", 0) or 0
+    )
+    expected_features = int(
+        getattr(config.training, "canonical_expected_features", 0) or 0
+    )
+
+    if expected_timesteps and int(T) != expected_timesteps:
+        raise ValueError(
+            "Canonical waveform timestep mismatch: "
+            f"observed={int(T)} expected={expected_timesteps}"
+        )
+
+    if expected_features and int(F_eff) != expected_features:
+        raise ValueError(
+            "Canonical waveform feature mismatch: "
+            f"observed={int(F_eff)} expected={expected_features}"
+        )
+
     if X_phasor_all is not None:
         T_phasor = int(X_phasor_all.shape[1])
         F_phasor = int(X_phasor_all.shape[2])
@@ -401,6 +445,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         n_splits,
     )
 
+    # Phase 3: create and audit event-grouped outer folds before model execution.
     splits = build_cv_splits_stratified(
         y_all=y_all,
         groups_np=groups_np,
@@ -423,6 +468,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
             prior_values=d_phys_prior,
         )
 
+    # Phase 4: resolve optimization/evaluation mode in compact-index coordinates.
     best_lr, best_wd, eval_only, resave_eval_only = select_best_lr_wd(
         config=config,
         X_used=X_used_filtered,
@@ -462,6 +508,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
 
     include_groups = config.training.feature_groups_include
 
+    # Phase 5: execute selected folds; each fold owns prediction alignment/storage.
     for fold_idx, (train_pool_idx, test_idx) in enumerate(splits, start=0):
         requested_fold = getattr(config.training, "canonical_fold", None)
         if requested_fold is not None and int(requested_fold) != fold_idx:

@@ -7,3 +7,5 @@ expected_rows: 40564
 expected_events: 9022
 aggregation: arithmetic_mean
 
+expected_timesteps: 384
+expected_features: 48

@@ -211,6 +211,25 @@ def compute_zapp_from_window(
     dt_start: float,
     onset_idx_from_dt_start_fn,
 ) -> tuple[complex, str, str]:
+    """Compute case-specific apparent impedance from one post-fault cycle.
+
+    Args:
+        x_raw: ``(T, 6)`` terminal ``[Va,Vb,Vc,Ia,Ib,Ic]`` samples, or a
+            ``(T, 12)`` paired view whose first terminal is used.
+        fs: Sampling frequency in hertz.
+        f_nom: Nominal system frequency in hertz.
+        r1, x1, r0, x0: Positive/zero-sequence line impedance components in the
+            repository's established per-line convention.
+        case: Three-phase, single-line-ground, line-line, or line-line-ground
+            case code controlling the compensated measurement loop.
+        dt_start: Fault-onset timing consumed by ``onset_idx_from_dt_start_fn``.
+
+    Returns:
+        ``(complex_impedance, normalized_case, reason)``. Invalid shapes,
+        unavailable full cycles, unknown cases, and non-finite results return a
+        complex NaN with a stable reason code. No distance conversion or clipping
+        occurs here.
+    """
     if x_raw.shape[1] not in {6, 12}:
         return np.nan + 1j * np.nan, "invalid", f"unexpected_channel_count_{x_raw.shape[1]}"
 

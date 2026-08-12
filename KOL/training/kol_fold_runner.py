@@ -110,6 +110,21 @@ def _save_outputs_for_fold(
     case_np,
     logger,
 ) -> None:
+    """Persist one fold's checkpoint, splits, predictions, and diagnostics.
+
+    Checkpoint writing is mandatory and propagates errors. Split, prediction,
+    and subgroup exports are best-effort: each catches and logs its own failure
+    so a completed scientific fold is not discarded because an auxiliary report
+    failed. All indices address ``labels_df_used``. ``idx_test_predictions`` may
+    be the ordered prefix emitted by a capped smoke-test loader. Hybrid exports
+    add the normalized prior plus mode-specific residual/GRU/gate/case arrays.
+
+    Args:
+        idx_test: Full outer-test indices used for split provenance.
+        idx_test_predictions: Row indices matching emitted prediction arrays, or
+            ``None`` when all outer-test rows were evaluated.
+    """
+    # Persistence phase 1: checkpoint failure is fatal to the fold.
     save_checkpoint(
         path=ckpt_path,
         model=model,
@@ -134,6 +149,7 @@ def _save_outputs_for_fold(
     )
     logger.info("Saved checkpoint: %s", ckpt_path)
 
+    # Persistence phase 2: ancillary artifacts fail independently and are logged.
     try:
         split_path = save_fold_splits(
             out_dir=run_out_dir,
@@ -277,6 +293,27 @@ def run_one_fold(
     X_phasor_all: np.ndarray | None = None,
     n_phasor_features: int | None = None,
 ) -> dict[str, Any]:
+    """Train or evaluate one outer fold and align its exported artifacts.
+
+    Outer ``train_pool_idx``/``test_idx`` address the already filtered waveform
+    and label arrays. The train pool is split again by event group for validation.
+    With no physics prior, the standard private model path is used; otherwise the
+    KOL mode selects legacy residual, GRU-only, convex fusion, or bounded residual
+    loaders/models. ``eval_only`` requires and validates an existing checkpoint;
+    training paths select their best validation state before test prediction.
+
+    Smoke batch caps may emit only a prefix of the ordered test sampler, which is
+    explicitly aligned before persistence. Normalized predictions and diagnostic
+    prior/residual/GRU/gate/case arrays are passed to the artifact writer.
+
+    Returns:
+        Fold number, realized train/validation/test counts, and test metrics.
+
+    Raises:
+        FileNotFoundError: If evaluation-only mode lacks its checkpoint.
+        NotImplementedError: For unsupported task/input combinations.
+    """
+    # Phase 1: split the outer training pool by event and resolve the checkpoint.
     train_pool_idx = np.asarray(train_pool_idx, dtype=int)
     test_idx = np.asarray(test_idx, dtype=int)
 
@@ -327,6 +364,7 @@ def run_one_fold(
 
     kol_model_mode = str(kol_model_mode).lower().strip()
 
+    # Phase 2: build the family-specific loaders, model, and optimization path.
     if d_phys_prior is None:
         train_loader, val_loader, test_loader = make_loaders(
             X_used=X_used_filtered,
@@ -744,6 +782,7 @@ def run_one_fold(
 
             y_score_np = residual_np
 
+    # Phase 3: align predictions with compact test indices before persistence.
     # A capped test loader emits a prefix of the sampler's ordered indices.
     # Keep artifact metadata aligned with that partial prediction vector.
     idx_test_predictions = test_idx[: len(y_true_np)]

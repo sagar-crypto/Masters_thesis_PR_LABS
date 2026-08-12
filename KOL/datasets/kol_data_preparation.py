@@ -136,6 +136,25 @@ def load_filtered_training_data(
     config: MainConfig,
     logger,
 ) -> PreparedTrainingData:
+    """Load waveforms and establish the canonical training-row coordinate system.
+
+    The private loader supplies ``X`` as ``(rows, timesteps, features)`` plus a
+    row-aligned label frame. Feature-group selection is applied first, followed
+    by topology/target validity, optional line selection, and the configured
+    fault-start window policy. At 90/110 kV the public protocols subsequently
+    expect effective tensors of ``384 x 48``/``576 x 48`` per retained row.
+
+    Args:
+        config: Private-schema configuration produced by the public adapter.
+        logger: Logger receiving filter counts and window diagnostics.
+
+    Returns:
+        Filtered tensors and labels, source metadata, deferred feature indices,
+        original valid-row indices, and the active operator/window modes. The
+        returned labels and tensor share a fresh positional index; ``valid_row_idx``
+        still refers to the pre-filter loader coordinates.
+    """
+    # Phase 1: load and apply canonical channel groups before row filtering.
     X, labels_df, meta = load_windowed_dataset(config)
 
     include_groups = config.training.feature_groups_include
@@ -151,6 +170,7 @@ def load_filtered_training_data(
     target_label = str(config.training.target_label)
     topology = str(config.dataset.topology)
 
+    # Phase 2: reject rows invalid for the topology/target scientific contract.
     labels_df_used, X_used_filtered, valid_row_idx = _apply_topology_valid_row_filter(
         X_used=X_used,
         labels_df=labels_df,
@@ -195,6 +215,7 @@ def load_filtered_training_data(
         or apply_window_filter_without_operator
     )
 
+    # Phase 3: select the cohort's fault-start windows in filtered coordinates.
     labels_df_used, X_used_filtered = (
         _apply_kol_window_filter_if_enabled(
             labels_df_used=labels_df_used,

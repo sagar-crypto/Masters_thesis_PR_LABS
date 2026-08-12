@@ -24,6 +24,29 @@ def load_operator_inputs_if_enabled(
     config: MainConfig,
     labels_df_used: pd.DataFrame,
 ) -> tuple[Optional[np.ndarray], Optional[np.ndarray], list[str]]:
+    """Align a prepared physics prior and optional features to training rows.
+
+    Rows are left-joined by event identity and, when both frames expose it,
+    ``window_idx``. The unchanged row count and finite prior check enforce exact
+    matched-prior identity rather than silently duplicating or dropping windows.
+    CSV/Parquet distances are percentage points and are returned divided by 100
+    for neural targets. GRU-only and learned convex-fusion modes intentionally
+    discard historical operator features to prevent unintended information use;
+    bounded/legacy modes use only the configured canonical feature columns.
+
+    Args:
+        config: Private-schema training configuration.
+        labels_df_used: Filtered, row-ordered waveform labels.
+
+    Returns:
+        ``(prior, features, feature_names)`` where ``prior`` has shape ``(N,)``
+        in normalized distance units and features, when present, have shape
+        ``(N, F_op)``. Disabled operator input returns ``(None, None, [])``.
+
+    Raises:
+        ValueError: If paths/columns are missing or numeric values are non-finite.
+        RuntimeError: If the merge changes the number of training rows.
+    """
     use_ops = bool(getattr(config.training, "use_operator_features", False))
     if not use_ops:
         return None, None, []
@@ -326,6 +349,23 @@ def build_both_side_fusion_features(
     feat_local: dict,
     feat_remote: dict,
 ) -> dict:
+    """Fuse two one-ended estimates in the local-side orientation.
+
+    Both inputs contain distances in percentage points measured outward from
+    their own terminal. Remote estimates are therefore flipped as ``100 - d``
+    before means, disagreements, edge gating, or confidence weighting. Raw and
+    clipped variants are retained: clipping bounds exported physical locations,
+    while flags preserve evidence that an apparent-impedance estimate exceeded
+    the line. Takagi values are fused only when both sides are finite.
+
+    Args:
+        feat_local: One-ended features measured from the local terminal.
+        feat_remote: One-ended features measured from the remote terminal.
+
+    Returns:
+        Percentage-valued local/remote/fused distances, disagreement measures,
+        clipping-derived weights, and any valid paired Takagi summaries.
+    """
     d_local_real_pct = feat_local["d_phys_real_pct"]
     d_remote_real_pct = feat_remote["d_phys_real_pct"]
     d_remote_real_flipped_pct = 100.0 - d_remote_real_pct
