@@ -63,17 +63,35 @@ def _report_base(cfg) -> dict[str, Any]:
 
 
 def deep_validate(cfg) -> dict[str, Any]:
+    """Load and audit one canonical experiment without training a model.
+
+    Validation first rejects bad metadata or missing paths. Physics experiments
+    then use the operator-data path and grouped folds; waveform and hybrid
+    experiments use the training-data filters, enforce their effective
+    ``timesteps x features`` contract, load any matched prior, and reproduce the
+    configured split strategy. All branches finish with the same cohort audit.
+
+    Args:
+        cfg: Resolved public experiment configuration.
+
+    Returns:
+        A report dictionary with observed dimensions on success. Expected data,
+        dependency, merge, shape, and split failures are captured in ``errors``
+        and reported with status ``invalid`` rather than raised.
+    """
     report = _report_base(cfg)
     errors = validate_metadata(cfg) + check_files(cfg)
     if errors:
         report["errors"] = errors
         return report
     try:
+        # Phase 1: cross the public/private boundary only after cheap preflight.
         from KOL.common.cv_utils import audit_cohort
         require_private_dependency(cfg)
         enable_private_imports()
         legacy = to_private_config(cfg)
         family = experiment_family(cfg)
+        # Phase 2: reproduce the family-specific preparation and split path.
         if family == "physics":
             from KOL.common.operator_data_prep import load_and_filter_operator_data, apply_operator_window_selection
             from sklearn.model_selection import GroupKFold
@@ -88,7 +106,38 @@ def deep_validate(cfg) -> dict[str, Any]:
             import logging
             prepared = load_filtered_training_data(config=legacy, logger=logging.getLogger(__name__))
             df, X = prepared.labels_df_used, prepared.X_used_filtered
-            effective_shape = [int(X.shape[1]), int(X.shape[2]) if prepared.feature_indices_for_ds is None else len(prepared.feature_indices_for_ds)]
+            effective_shape = [
+                int(X.shape[1]),
+                (
+                    int(X.shape[2])
+                    if prepared.feature_indices_for_ds is None
+                    else len(prepared.feature_indices_for_ds)
+                ),
+            ]
+
+            expected_timesteps = cfg.protocol.get("expected_timesteps", None)
+            expected_features = cfg.protocol.get("expected_features", None)
+
+            if (
+                expected_timesteps is not None
+                and effective_shape[0] != int(expected_timesteps)
+            ):
+                raise ValueError(
+                    "Waveform timestep mismatch: "
+                    f"observed={effective_shape[0]} "
+                    f"expected={int(expected_timesteps)}"
+                )
+
+            if (
+                expected_features is not None
+                and effective_shape[1] != int(expected_features)
+            ):
+                raise ValueError(
+                    "Waveform feature mismatch: "
+                    f"observed={effective_shape[1]} "
+                    f"expected={int(expected_features)}"
+                )
+
             prior, _, _ = load_operator_inputs_if_enabled(config=legacy, labels_df_used=df)
             splits = build_cv_splits_stratified(
                 y_all=np.asarray(df[str(cfg.target)]), groups_np=df["sample_id"].to_numpy(),
@@ -96,6 +145,7 @@ def deep_validate(cfg) -> dict[str, Any]:
                 cv_mode="group" if family == "waveform" else "stratified_location",
                 stratify_col="y_fault_location",
             )
+        # Phase 3: apply one invariant audit to the prepared coordinate system.
         result = audit_cohort(
             df, splits, expected_rows=int(cfg.protocol.expected_rows),
             expected_events=int(cfg.protocol.expected_events), expected_folds=int(cfg.folds),

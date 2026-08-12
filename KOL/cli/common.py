@@ -63,6 +63,24 @@ def package_versions() -> dict[str, str]:
 
 @contextmanager
 def provenance_run(cfg: DictConfig, command: str):
+    """Create an isolated run directory and maintain its provenance record.
+
+    The context writes resolved configuration and a ``running`` record before
+    yielding the new directory. Normal exit marks the run complete; exceptions
+    are re-raised after their type/message is recorded as the failure reason.
+    The final record is written in ``finally`` so both paths receive an end time.
+
+    Args:
+        cfg: Resolved canonical configuration.
+        command: User-facing command string, also used to retain Hydra overrides.
+
+    Yields:
+        The newly created timestamped output directory.
+
+    Raises:
+        FileExistsError: If the timestamped directory already exists.
+        Exception: Any exception from the wrapped workflow, unchanged.
+    """
     output = Path(str(cfg.paths.output_root)) / str(cfg.experiment.id) / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output.mkdir(parents=True, exist_ok=False)
     (output / "config.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True), encoding="utf-8")

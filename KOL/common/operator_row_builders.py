@@ -32,6 +32,18 @@ def build_single_side_operator_row(
     y_col: str,
     operator_side_mode: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    """Construct one validated one-ended operator row.
+
+    ``x_raw_full`` is a ``(timesteps, channels)`` waveform bank row. Channels
+    for the labelled fault line and requested local/remote side are extracted,
+    then phasor/apparent-impedance features are computed using ohms-per-kilometre
+    line parameters and line length in kilometres. Exported distances are
+    percentage points. Invalid cases, zero-length lines, channel failures, or a
+    scientific feature reason reject the row as ``(None, reason)``.
+
+    Returns:
+        ``(row, None)`` on success or ``(None, stable_reason_code)`` on rejection.
+    """
     case = derive_fault_case_from_processed_labels(row)
     if case == "invalid":
         return None, "invalid_case_from_processed_labels"
@@ -105,14 +117,19 @@ def build_two_ended_posseq_operator_row(
     f_nom: float,
     y_col: str,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """
-    Build one raw synchronized two-ended positive-sequence operator row.
+    """Build one synchronized two-ended positive-sequence operator row.
 
-    This function deliberately uses only:
-        compute_two_ended_posseq_distance_pct(..., current_sign=+1)
+    Local (default) and remote (opposite) ``(timesteps, VI channels)`` views are
+    passed directly to the two-ended equation with ``current_sign=+1``. The
+    returned distance is in percentage points from the local terminal. This
+    canonical path deliberately excludes one-ended apparent impedance, Takagi,
+    modified-Takagi, and historical fusion features so the 2E prior has a single
+    scientific identity. Formula-level failures remain in the exported reason
+    column; line-parameter, line-length, and channel failures reject the row.
 
-    It does not compute one-ended apparent impedance, Takagi,
-    modified-Takagi, or historical fusion features.
+    Returns:
+        ``(row, None)`` when construction succeeds, otherwise
+        ``(None, stable_reason_code)``.
     """
     try:
         r1, x1, r0, x0, line_len_km = get_line_params_for_row(
@@ -186,6 +203,20 @@ def build_both_side_operator_row(
     y_col: str,
     takagi_imp_bank: dict[str, dict[str, complex]] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    """Construct paired one-ended, fused, and enriched operator features.
+
+    The same fault-line waveform is viewed from the local/default and
+    remote/opposite terminals. Each side must yield a valid one-ended estimate;
+    the remote percentage is flipped into local orientation before fusion. Both
+    positive-sequence current-sign conventions are retained diagnostically.
+    Modified-Takagi enrichment is added after base fusion using the matched line
+    impedance bank and a case-appropriate seed; missing enrichment prerequisites
+    produce explicit empty/reason columns rather than changing base-row validity.
+
+    Returns:
+        ``(row, None)`` on success or ``(None, stable_reason_code)`` when the
+        fault case, line, channel mapping, or either one-ended estimate is invalid.
+    """
     case = derive_fault_case_from_processed_labels(row)
     if case == "invalid":
         return None, "invalid_case_from_processed_labels"

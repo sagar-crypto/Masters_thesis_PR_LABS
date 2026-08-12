@@ -338,7 +338,18 @@ def train_learned_fusion(
     epochs: int = 20,
     patience: int = 15,
 ):
-    """Train GRU-only, convex fusion, or bounded residual fusion."""
+    """Train a waveform-only, convex-fusion, or bounded-residual model.
+
+    All targets/priors are normalized distances. GRU-only minimizes direct-head
+    MSE; learned fusion minimizes fused plus auxiliary direct-head MSE; bounded
+    residual fusion uses Smooth L1 on the *unclipped* prediction plus a small
+    residual-magnitude penalty. Gradient norms are clipped at 5. The best state
+    is selected by validation loss for GRU/convex modes and validation MAE (the
+    thesis metric) for bounded fusion, with ``1e-4`` early-stopping tolerance.
+
+    Returns:
+        The best validation selection score after restoring the best state.
+    """
 
     model_mode = str(
         model_mode
@@ -794,7 +805,19 @@ def evaluate_learned_fusion(
     logger,
     model_mode: str,
 ):
-    """Evaluate direct GRU, convex fusion, or bounded residual fusion."""
+    """Evaluate a learned-fusion mode and emit aligned diagnostic arrays.
+
+    Predictions are clipped normalized distances. The common return contains
+    metrics, targets, predictions, priors, an auxiliary array, gates, and case
+    IDs. The auxiliary array is the effective residual for bounded fusion and
+    the direct GRU estimate for GRU-only/convex fusion. Metrics include prior
+    comparisons and gate summaries; bounded mode additionally reports correction
+    and improvement/worsening diagnostics.
+
+    Returns:
+        ``(metrics, y_true, y_pred, d_prior, auxiliary, alpha, case_idx)`` with
+        row order matching the test loader.
+    """
 
     model_mode = str(
         model_mode

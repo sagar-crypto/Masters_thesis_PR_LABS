@@ -86,6 +86,23 @@ def add_modified_takagi_columns(
     Z0_src_local: complex,
     Z0_src_remote: complex,
 ) -> None:
+    """Enrich an SLG export row with auditable modified-Takagi variants.
+
+    Local and remote inputs are terminal-oriented ``(T, 6)`` voltage/current
+    arrays. Each seed is a percentage from its own relay terminal and is clipped
+    before use; seed values and sources are exported to prove that no true fault
+    label entered the calculation. Near/far zero-sequence source impedances are
+    swapped for the remote calculation. Remote distances are later flipped into
+    local orientation for paired means. Formula failures remain represented by
+    NaN values and reason codes rather than rejecting the already valid base row.
+
+    Args:
+        row_out: Mutable operator row receiving percentage and reason columns.
+        row: Source label row; only timing/identity metadata is consumed.
+        case: Fault case; the scientific operator is meaningful only for SLG.
+        m_local_seed_pct: Inference-time local-terminal distance seed, percent.
+        m_remote_seed_pct: Inference-time remote-terminal distance seed, percent.
+    """
     # m must be available at inference time.
     # Local and remote seeds are both expressed from their respective relay sides.
     m_local = float(np.clip(m_local_seed_pct, 0.0, 100.0))

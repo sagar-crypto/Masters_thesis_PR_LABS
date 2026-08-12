@@ -16,6 +16,22 @@ def audit_case_and_formula_mapping(
     feature_names: list[str],
     max_print: int | None = 50,
 ) -> pd.DataFrame:
+    """Audit fault labels, formula selection, and waveform-channel resolution.
+
+    Each processed label row is independently reconstructed from phase flags and
+    the grounded flag, then compared with the production case mapper. The chosen
+    scientific formula and fault-line voltage/current channel names are recorded;
+    channel errors are captured per row rather than aborting the cohort audit.
+
+    Args:
+        df: Processed label rows containing event, fault, phase, and timing fields.
+        feature_names: Waveform channel names used to resolve the labelled line.
+        max_print: Number of audit rows to print, or ``None`` for summary only.
+
+    Returns:
+        One audit row per input row, including case/formula identity, channel
+        mapping status, and the original positional ``row_idx``.
+    """
     rows = []
 
     for i in range(len(df)):

@@ -21,7 +21,25 @@ def _private_base(topology: str) -> DictConfig:
 
 
 def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> DictConfig:
-    """Return a complete, resolved legacy config used by the scientific runners."""
+    """Map a canonical public experiment onto the private runner schema.
+
+    The adapter chooses the voltage-specific topology, fixes the private model
+    input to 48 channels, and translates P/G/C/L family choices into physics,
+    waveform-only, or operator-prior execution.  Hybrid priors remain percentage
+    values on disk; downstream loading normalizes them for the neural models.
+    Canonical cohort dimensions, split controls, and path overrides are copied
+    into the legacy tree so its existing runners can enforce the public contract.
+
+    Args:
+        cfg: Resolved public Hydra configuration.
+        output_dir: Optional run directory replacing ``cfg.paths.output_root``.
+
+    Returns:
+        A resolved, non-struct ``DictConfig`` accepted by the private runners.
+
+    Raises:
+        ValueError: If required mapped values or unresolved interpolations remain.
+    """
     topology = "hv_double_line_90kv" if int(cfg.dataset.voltage_kv) == 90 else "hv_double_line_110kv"
     legacy = _private_base(topology)
     # The private Hydra tree is composed in struct mode; the compatibility
@@ -37,7 +55,7 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
         },
         "model": {
             "model_name": "gru_regressor",
-            "input_size": 48 if int(cfg.dataset.voltage_kv) == 90 else 18,
+            "input_size": 48,
             "hidden_size": int(cfg.model.get("hidden_size", 128) or 128),
             "num_layers": int(cfg.model.get("num_layers", 2) or 2),
             "dropout": float(cfg.model.get("dropout", 0.1) or 0.0),
@@ -59,10 +77,14 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
             "kol_prediction_mode": str(cfg.training.get("kol_prediction_mode", "plain")),
             "kol_window_mode": str(cfg.protocol.cohort_mode),
             "operator_window_mode": str(cfg.protocol.cohort_mode),
-            "operator_side_mode": "both" if str(cfg.prior.mode) == "two_ended" else "default",
+            "operator_side_mode": "two_ended_posseq" if str(cfg.prior.mode) == "two_ended" else "default",
             "line_filter": cfg.training.get("line_filter", None),
             "tune_lr_wd": False,
-            "feature_groups_include": ["lines", "loads", "winds", "extgrid"],
+            "feature_groups_include": (
+                ["lines"]
+                if int(cfg.dataset.voltage_kv) == 110 and not is_physics
+                else ["lines", "loads", "winds", "extgrid"]
+            ),
             "materialize_feature_filters": False,
             "input_representation": "waveform",
             "cv_mode": "group" if is_gru else "stratified_location",
@@ -73,6 +95,12 @@ def to_private_config(cfg: DictConfig, *, output_dir: Path | None = None) -> Dic
             "gate_init_bias": float(cfg.model.get("gate_bias", -3.0)),
             "canonical_expected_rows": int(cfg.protocol.expected_rows),
             "canonical_expected_events": int(cfg.protocol.expected_events),
+            "canonical_expected_timesteps": int(
+                cfg.protocol.get("expected_timesteps", 0) or 0
+            ),
+            "canonical_expected_features": int(
+                cfg.protocol.get("expected_features", 0) or 0
+            ),
             "canonical_window_indices": cfg.protocol.window_indices,
             "canonical_hard_audit": True,
             "canonical_experiment_id": str(cfg.experiment.id),
