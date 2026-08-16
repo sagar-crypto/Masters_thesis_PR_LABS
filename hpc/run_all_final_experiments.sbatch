@@ -1,19 +1,33 @@
-#!/usr/bin/env bash
+#!/bin/bash -l
 #SBATCH --job-name=kol-final
 #SBATCH --array=0-13
-#SBATCH --output=outputs/reproducibility_validation/preflight/slurm/%A_%a.out
-#SBATCH --error=outputs/reproducibility_validation/preflight/slurm/%A_%a.err
-# Site wrapper must create the log directory before sbatch and may set partition/account.
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=24:00:00
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
+#SBATCH --output=./hpc/hpc_logs/%x-%A_%a-on-%N.out
+#SBATCH --error=./hpc/hpc_logs/%x-%A_%a-on-%N.err
+#SBATCH --export=ALL
 set -euo pipefail
-: "${KOL_REPO_ROOT:?Set KOL_REPO_ROOT}"
-: "${KOL_DATA_ROOT:?Set KOL_DATA_ROOT}"
-export KOL_OUTPUT_ROOT="${KOL_OUTPUT_ROOT:-$KOL_REPO_ROOT/outputs/reproducibility_validation/full_rerun}"
-export PYTHONPATH="$KOL_REPO_ROOT:$KOL_REPO_ROOT/third_party/dl_fault_repo/src${PYTHONPATH:+:$PYTHONPATH}"
-cd "$KOL_REPO_ROOT"
-experiments=(P90-1E P90-2E P110-1E P110-2E G90 G110 C90-1E L90-1E C90-2E L90-2E C110-1E L110-1E C110-2E L110-2E)
-id="${experiments[$SLURM_ARRAY_TASK_ID]}"
-if [[ "$id" == P* ]]; then
-  python -m KOL.cli.physics "experiment=$id"
-else
-  python -m KOL.cli.train "experiment=$id"
+if (( $# > 1 )); then
+  echo "Usage: sbatch hpc/run_all_final_experiments.sbatch [validate|smoke|full]" >&2
+  exit 2
 fi
+MODE="${1:-full}"
+case "$MODE" in
+  validate|smoke|full) ;;
+  *) echo "ERROR: Unknown mode: $MODE" >&2; echo "Usage: sbatch hpc/run_all_final_experiments.sbatch [validate|smoke|full]" >&2; exit 2 ;;
+esac
+: "${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is missing; submit this launcher with sbatch}"
+experiments=(
+  P90-1E P90-2E P110-1E P110-2E G90 G110
+  C90-1E L90-1E C90-2E L90-2E
+  C110-1E L110-1E C110-2E L110-2E
+)
+if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= ${#experiments[@]} )); then
+  echo "ERROR: SLURM_ARRAY_TASK_ID is out of range: $SLURM_ARRAY_TASK_ID" >&2
+  exit 2
+fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/run_experiment.sh" "${experiments[$SLURM_ARRAY_TASK_ID]}" "$MODE"

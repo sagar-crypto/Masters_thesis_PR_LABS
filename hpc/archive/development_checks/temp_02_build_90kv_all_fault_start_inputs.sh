@@ -31,7 +31,7 @@ if [ ! -s "$RAW_POINTER" ]; then
 
     echo
     echo "Run this first:"
-    echo "sbatch hpc/temp_01_export_90kv_all_fault_start_physics.sh"
+    echo "sbatch hpc/archive/development_checks/temp_01_export_90kv_all_fault_start_physics.sh"
 
     exit 1
 fi

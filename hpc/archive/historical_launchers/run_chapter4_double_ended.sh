@@ -19,7 +19,7 @@ set -euo pipefail
 #   L110-2E
 #
 # Smoke-test override:
-#   TRAINING_EPOCHS=1 TRAINING_PATIENCE=1 bash hpc/run_chapter4_double_ended.sh
+#   TRAINING_EPOCHS=1 TRAINING_PATIENCE=1 bash hpc/archive/historical_launchers/run_chapter4_double_ended.sh
 #
 # Production defaults:
 #   epochs=150
