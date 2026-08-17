@@ -96,15 +96,23 @@ Evaluation loads an existing checkpoint without retraining and may reuse saved s
 
 ### 5. Full HPC execution
 
-Portable Hydra/Slurm entry points and historical compatibility scripts live in `hpc/`:
+The supported Slurm reproduction interface consists of a single-experiment launcher and a 14-experiment array launcher. Both support `validate`, `smoke`, and `full` modes; omitting the mode defaults to `full`. Use an experiment ID from the canonical experiment matrix above.
 
 ```bash
-sbatch hpc/run_experiment.sh L110-1E
-sbatch hpc/run_experiment.sh G90 smoke training.epochs=1
-sbatch hpc/run_experiment.sh C110-1E validate
+# One experiment
+sbatch hpc/run_experiment.sh L110-1E validate
+sbatch hpc/run_experiment.sh L110-1E smoke
+sbatch hpc/run_experiment.sh L110-1E full
+
+# All 14 experiments
+sbatch hpc/run_all_final_experiments.sbatch validate
+sbatch hpc/run_all_final_experiments.sbatch smoke
+sbatch hpc/run_all_final_experiments.sbatch full
 ```
 
-The first command runs all configured folds; the second selects the smoke mode and adds a Hydra override; the third performs validation. The older named scripts preserve the original data-preparation and Chapter 4 invocation patterns and may contain site-specific assumptions.
+`hpc/run_experiment.sh` launches one named experiment, while `hpc/run_all_final_experiments.sbatch` maps a Slurm array across the complete canonical matrix. `hpc/setup_hpc_env.sh` supplies their shared environment setup.
+
+The remaining HPC scripts are organized by provenance: `hpc/archive/historical_launchers/` contains superseded experiment launchers, `hpc/archive/input_generation/` contains one-off input-generation workflows, and `hpc/archive/development_checks/` contains temporary staged development checks. These archived scripts may contain site-specific assumptions and historical paths. They are retained for provenance and are not a supported reproduction interface.
 
 Analysis of an existing prediction export is separate from model execution:
 
@@ -118,7 +126,7 @@ It checks exact matched-prior identity before producing arithmetic event-level p
 
 - `KOL/`: public adapters, data preparation, scientific operators, models, and training orchestration.
 - `conf/`: Hydra configuration groups and the 14 canonical experiment compositions.
-- `hpc/`: portable launchers plus historical/site-specific shell and Slurm workflows.
+- `hpc/`: the supported Slurm launchers and shared environment setup, plus archived historical, input-generation, and development-check scripts retained for provenance.
 - `third_party/dl_fault_repo`: a private Git submodule reference; its implementation is not documented or modified here.
 - `06_chapter4_ablation_evidence.ipynb`, `07_chapter4_line_location_analysis.ipynb`, and `post_hocanalysis.ipynb`: final analysis notebooks; `EDA.ipynb` is exploratory.
 - `dataset_insights_plots/`: the tracked cohort-summary figures used by the documentation/analysis.
@@ -134,6 +142,6 @@ Known limitations:
 - No automated test files are tracked in this repository, even though development dependencies include `pytest`; `pytest` is therefore not a clean-clone acceptance check.
 - Deep validation, training, physics evaluation, and checkpoint inference require private code and external assets.
 - Historical checkpoints, prediction exports, reproducibility directories, and Chapter 4 results are not distributed in a clean clone.
-- The notebooks and older HPC scripts can refer to those local historical paths and require adaptation outside the original environment.
+- The notebooks and archived HPC scripts can refer to those local historical paths and require adaptation outside the original environment; the archived scripts are not supported reproduction entry points.
 
 For a public-tree sanity check, compile `KOL`, run shallow validation across all experiment IDs, exercise configuration printing and CLI help, and run `git diff --check`.

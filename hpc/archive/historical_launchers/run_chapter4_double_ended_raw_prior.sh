@@ -39,11 +39,11 @@ set -euo pipefail
 #
 #   sbatch \
 #     --export=ALL,TRAINING_EPOCHS=1,TRAINING_PATIENCE=1 \
-#     hpc/run_chapter4_double_ended_raw_prior.sh
+#     hpc/archive/historical_launchers/run_chapter4_double_ended_raw_prior.sh
 #
 # Production:
 #
-#   sbatch hpc/run_chapter4_double_ended_raw_prior.sh
+#   sbatch hpc/archive/historical_launchers/run_chapter4_double_ended_raw_prior.sh
 # =============================================================================
 
 

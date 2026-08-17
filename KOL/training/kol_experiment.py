@@ -24,7 +24,6 @@ from KOL.common.cv_utils import (
     setup_wandb_logging,
 )
 from KOL.common.operator_features import load_operator_inputs_if_enabled
-from KOL.common.phasor_representation import apply_input_representation, build_waveform_phasor_dual_inputs
 from KOL.common.windowing import get_kol_mode
 from KOL.datasets.kol_data_preparation import load_filtered_training_data
 from KOL.training.kol_fold_runner import run_one_fold
@@ -234,41 +233,10 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
 
     X_used_filtered = prepared.X_used_filtered
     labels_df_used = prepared.labels_df_used
-    meta = prepared.meta
     feature_indices_for_ds = prepared.feature_indices_for_ds
     valid_row_idx = prepared.valid_row_idx
     use_ops = prepared.use_ops
     kol_window_mode = prepared.kol_window_mode
-
-    input_representation = str(
-        getattr(config.training, "input_representation", "waveform")
-    ).lower().strip()
-
-    X_phasor_all = None
-    phasor_feature_names = None
-
-    if input_representation == "waveform_phasor_dual":
-        (
-            X_used_filtered,
-            X_phasor_all,
-            meta,
-            feature_indices_for_ds,
-            phasor_feature_names,
-        ) = build_waveform_phasor_dual_inputs(
-            X_used_filtered=X_used_filtered,
-            meta=meta,
-            feature_indices_for_ds=feature_indices_for_ds,
-            config=config,
-            logger=logger,
-        )
-    else:
-        X_used_filtered, meta, feature_indices_for_ds = apply_input_representation(
-            X_used_filtered=X_used_filtered,
-            meta=meta,
-            feature_indices_for_ds=feature_indices_for_ds,
-            config=config,
-            logger=logger,
-        )
 
     groups_used = labels_df_used[L.SAMPLE_ID]
 
@@ -288,11 +256,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
     )
 
     logger.info("KOL window mode: %s", kol_window_mode if use_ops else "n/a")
-    if kol_model_mode in {
-        "gru_only",
-        "learned_fusion",
-        "bounded_residual_fusion",
-    }:
+    if kol_model_mode == "bounded_residual_fusion":
         if d_phys_prior is None:
             raise ValueError(
                 "The GRU fusion pipelines require "
@@ -334,20 +298,6 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
             f"observed={int(F_eff)} expected={expected_features}"
         )
 
-    if X_phasor_all is not None:
-        T_phasor = int(X_phasor_all.shape[1])
-        F_phasor = int(X_phasor_all.shape[2])
-        logger.info(
-            "Dual-input dimensions | waveform=(T=%d, F=%d) | phasor=(T=%d, F=%d)",
-            int(X_used_filtered.shape[1]),
-            int(X_used_filtered.shape[2]),
-            T_phasor,
-            F_phasor,
-        )
-    else:
-        T_phasor = None
-        F_phasor = None
-
     base_model_name = str(config.model.model_name)
     kol_mode = get_kol_mode(config) if d_phys_prior is not None else None
 
@@ -357,11 +307,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
         if kol_model_mode == "legacy_residual":
             model_name = f"kol_{kol_mode}_{base_model_name}"
 
-        elif kol_model_mode in {
-            "gru_only",
-            "learned_fusion",
-            "bounded_residual_fusion",
-        }:
+        elif kol_model_mode == "bounded_residual_fusion":
             model_name = (
                 f"kol_{kol_model_mode}_{base_model_name}"
             )
@@ -370,8 +316,7 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
             raise ValueError(
                 "Unknown training.kol_model_mode="
                 f"'{kol_model_mode}'. Supported values are: "
-                "legacy_residual, gru_only, learned_fusion, "
-                "bounded_residual_fusion."
+                "legacy_residual, bounded_residual_fusion."
             )
 
     window_s = float(config.window_extraction.window_length)
@@ -551,8 +496,6 @@ def run_kol_cv_experiment(*, config, logger) -> pd.DataFrame:
             eval_only=bool(eval_only),
             resave_eval_only=bool(resave_eval_only),
             logger=logger,
-            X_phasor_all=X_phasor_all,
-            n_phasor_features=F_phasor,
         )
         all_fold_metrics.append(metrics_row)
 

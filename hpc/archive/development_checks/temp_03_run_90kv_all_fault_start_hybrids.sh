@@ -61,7 +61,7 @@ if [ ! -s "$INPUT_ENV" ]; then
 
     echo
     echo "Run this first:"
-    echo "bash hpc/temp_02_build_90kv_all_fault_start_inputs.sh"
+    echo "bash hpc/archive/development_checks/temp_02_build_90kv_all_fault_start_inputs.sh"
 
     exit 1
 fi

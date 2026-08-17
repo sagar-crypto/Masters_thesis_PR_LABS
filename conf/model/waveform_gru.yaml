@@ -1,6 +1,5 @@
 family: waveform_gru
 class_name: GRURegressor
-hidden_size: 128
-num_layers: 2
-dropout: 0.1
-
+hidden_size: 384
+num_layers: 3
+dropout: 0.2

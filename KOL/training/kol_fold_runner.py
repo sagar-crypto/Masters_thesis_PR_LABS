@@ -24,11 +24,9 @@ from KOL.common.cv_utils import (
     split_train_val_from_train_pool,
     validate_checkpoint_metadata,
 )
-from KOL.datasets.kol_datasets import make_kol_loaders, make_kol_dual_loaders
+from KOL.datasets.kol_datasets import make_kol_loaders
 from KOL.models.kol_residual_models import (
     KOLGRUCaseResidualRegressor,
-    KOLDualGRUCaseResidualRegressor,
-    KOLGRULearnedFusionRegressor,
     KOLGRUBoundedResidualFusionRegressor,
 )
 from KOL.training.kol_residual_train import (
@@ -105,7 +103,6 @@ def _save_outputs_for_fold(
     d_phys_prior,
     dprior_np,
     residual_np,
-    d_gru_np,
     alpha_np,
     case_np,
     logger,
@@ -179,7 +176,7 @@ def _save_outputs_for_fold(
             meta_cols.append("case")
 
         logger.info(
-            "DEBUG about to save predictions | fold=%d | run_out_dir=%s | len(test_idx)=%d | y_true_shape=%s | y_pred_shape=%s | y_score_shape=%s",
+            "About to save predictions | fold=%d | run_out_dir=%s | len(test_idx)=%d | y_true_shape=%s | y_pred_shape=%s | y_score_shape=%s",
             fold_idx,
             run_out_dir,
             len(idx_test),
@@ -198,9 +195,6 @@ def _save_outputs_for_fold(
 
             if residual_np is not None:
                 extra_cols["residual"] = residual_np
-
-            if d_gru_np is not None:
-                extra_cols["d_gru"] = d_gru_np
 
             if alpha_np is not None:
                 extra_cols["alpha"] = alpha_np
@@ -290,21 +284,18 @@ def run_one_fold(
     eval_only: bool,
     resave_eval_only: bool,
     logger,
-    X_phasor_all: np.ndarray | None = None,
-    n_phasor_features: int | None = None,
 ) -> dict[str, Any]:
     """Train or evaluate one outer fold and align its exported artifacts.
 
     Outer ``train_pool_idx``/``test_idx`` address the already filtered waveform
     and label arrays. The train pool is split again by event group for validation.
     With no physics prior, the standard private model path is used; otherwise the
-    KOL mode selects legacy residual, GRU-only, convex fusion, or bounded residual
-    loaders/models. ``eval_only`` requires and validates an existing checkpoint;
+    KOL mode selects the legacy residual or bounded-residual fusion path. ``eval_only`` requires and validates an existing checkpoint;
     training paths select their best validation state before test prediction.
 
     Smoke batch caps may emit only a prefix of the ordered test sampler, which is
     explicitly aligned before persistence. Normalized predictions and diagnostic
-    prior/residual/GRU/gate/case arrays are passed to the artifact writer.
+    prior/residual/gate/case arrays are passed to the artifact writer.
 
     Returns:
         Fold number, realized train/validation/test counts, and test metrics.
@@ -358,7 +349,6 @@ def run_one_fold(
 
     dprior_np = None
     residual_np = None
-    d_gru_np = None
     alpha_np = None
     case_np = None
 
@@ -454,69 +444,26 @@ def run_one_fold(
             raise NotImplementedError(
                 "First KOL residual version currently supports regression only."
             )
-
-        if kol_model_mode in {
-            "gru_only",
-            "learned_fusion",
-            "bounded_residual_fusion",
-        }:
-            if X_phasor_all is not None:
-                raise NotImplementedError(
-                    "The GRU fusion pipelines support "
-                    "training.input_representation=waveform only."
-                )
-            op_features_for_loader = (
-                op_features
-                if kol_model_mode == "bounded_residual_fusion"
-                else None
+        if kol_model_mode not in {"legacy_residual", "bounded_residual_fusion"}:
+            raise ValueError(
+                f"Unsupported KOL model mode '{kol_model_mode}'. Supported modes: "
+                "legacy_residual, bounded_residual_fusion."
             )
 
-            train_loader, val_loader, test_loader = make_kol_loaders(
-                    X_used=X_used_filtered,
-                    y_all=y_all,
-                    d_phys_prior=d_phys_prior,
-                    case_idx=case_idx,
-                    op_features=op_features_for_loader,
-                    idx_train=idx_train,
-                    idx_val=idx_val,
-                    idx_test=test_idx,
-                    feature_indices_for_ds=feature_indices_for_ds,
-                    batch_size=int(config.training.batch_size),
-                    num_workers=int(config.training.num_workers),
-                    pin_memory=bool(config.training.pin_memory),
-                )
-
-        elif X_phasor_all is not None:
-            train_loader, val_loader, test_loader = make_kol_dual_loaders(
-                X_waveform=X_used_filtered,
-                X_phasor=X_phasor_all,
-                y_all=y_all,
-                d_phys_prior=d_phys_prior,
-                case_idx=case_idx,
-                op_features=op_features,
-                idx_train=idx_train,
-                idx_val=idx_val,
-                idx_test=test_idx,
-                batch_size=int(config.training.batch_size),
-                num_workers=int(config.training.num_workers),
-                pin_memory=bool(config.training.pin_memory),
-            )
-
-        else:
-            train_loader, val_loader, test_loader = make_kol_loaders(
-                X_used=X_used_filtered,
-                y_all=y_all,
-                d_phys_prior=d_phys_prior,
-                case_idx=case_idx,
-                op_features=op_features,
-                idx_train=idx_train,
-                idx_val=idx_val,
-                idx_test=test_idx,
-                feature_indices_for_ds=feature_indices_for_ds,
-                batch_size=int(config.training.batch_size),
-                num_workers=int(config.training.num_workers),
-                pin_memory=bool(config.training.pin_memory),
-            )
+        train_loader, val_loader, test_loader = make_kol_loaders(
+            X_used=X_used_filtered,
+            y_all=y_all,
+            d_phys_prior=d_phys_prior,
+            case_idx=case_idx,
+            op_features=op_features,
+            idx_train=idx_train,
+            idx_val=idx_val,
+            idx_test=test_idx,
+            feature_indices_for_ds=feature_indices_for_ds,
+            batch_size=int(config.training.batch_size),
+            num_workers=int(config.training.num_workers),
+            pin_memory=bool(config.training.pin_memory),
+        )
 
         logger.info("op_features is None: %s", op_features is None)
         train_loader = _limit_loader(train_loader, max_train_batches)
@@ -526,133 +473,27 @@ def run_one_fold(
             logger.info("op_features shape: %s", op_features.shape)
             logger.info("n_op_features passed to model: %d", int(op_features.shape[1]))
 
-        if kol_model_mode in {
-            "gru_only",
-            "learned_fusion",
-        }:
-            model = KOLGRULearnedFusionRegressor(
-                n_features=int(F_eff),
-                hidden_size=int(
-                    getattr(
-                        config.model,
-                        "hidden_size",
-                        128,
-                    )
-                ),
-                num_layers=int(
-                    getattr(
-                        config.model,
-                        "num_layers",
-                        2,
-                    )
-                ),
-                dropout=float(
-                    getattr(
-                        config.model,
-                        "dropout",
-                        0.1,
-                    )
-                ),
-                bidirectional=bool(
-                    getattr(
-                        config.model,
-                        "bidirectional",
-                        False,
-                    )
-                ),
-            ).to(device)
-
-        elif kol_model_mode == "bounded_residual_fusion":
+        if kol_model_mode == "bounded_residual_fusion":
             model = KOLGRUBoundedResidualFusionRegressor(
                 n_features=int(F_eff),
-                n_op_features=(
-                    0
-                    if op_features is None
-                    else int(op_features.shape[1])
-                ),
-                hidden_size=int(
-                    getattr(
-                        config.model,
-                        "hidden_size",
-                        64,
-                    )
-                ),
-                num_layers=int(
-                    getattr(
-                        config.model,
-                        "num_layers",
-                        1,
-                    )
-                ),
-                dropout=float(
-                    getattr(
-                        config.model,
-                        "dropout",
-                        0.0,
-                    )
-                ),
-                bidirectional=bool(
-                    getattr(
-                        config.model,
-                        "bidirectional",
-                        False,
-                    )
-                ),
-                n_cases=len(
-                    CASE_TO_IDX
-                ),
-                case_emb_dim=int(
-                    getattr(
-                        config.training,
-                        "case_emb_dim",
-                        8,
-                    )
-                ),
+                n_op_features=0 if op_features is None else int(op_features.shape[1]),
+                hidden_size=int(getattr(config.model, "hidden_size", 64)),
+                num_layers=int(getattr(config.model, "num_layers", 1)),
+                dropout=float(getattr(config.model, "dropout", 0.0)),
+                bidirectional=bool(getattr(config.model, "bidirectional", False)),
+                n_cases=len(CASE_TO_IDX),
+                case_emb_dim=int(getattr(config.training, "case_emb_dim", 8)),
                 head_hidden_size=int(
-                    getattr(
-                        config.training,
-                        "fusion_head_hidden_size",
-                        64,
-                    )
+                    getattr(config.training, "fusion_head_hidden_size", 64)
                 ),
                 residual_max=float(
-                    getattr(
-                        config.training,
-                        "bounded_residual_max",
-                        1.0,
-                    )
+                    getattr(config.training, "bounded_residual_max", 1.0)
                 ),
                 gate_init_bias=float(
-                    getattr(
-                        config.training,
-                        "gate_init_bias",
-                        -3.0,
-                    )
+                    getattr(config.training, "gate_init_bias", -3.0)
                 ),
-                prediction_mode=(
-                    kol_prediction_mode
-                ),
+                prediction_mode=kol_prediction_mode,
             ).to(device)
-
-        elif X_phasor_all is not None:
-            if n_phasor_features is None:
-                raise ValueError(
-                    "n_phasor_features is required for dual-input model."
-                )
-
-            model = KOLDualGRUCaseResidualRegressor(
-                n_waveform_features=int(F_eff),
-                n_phasor_features=int(n_phasor_features),
-                n_op_features=0 if op_features is None else int(op_features.shape[1]),
-                hidden_size=int(getattr(config.model, "hidden_size", 128)),
-                num_layers=int(getattr(config.model, "num_layers", 2)),
-                dropout=float(getattr(config.model, "dropout", 0.1)),
-                bidirectional=bool(
-                    getattr(config.model, "bidirectional", False)
-                ),
-                n_cases=len(CASE_TO_IDX),
-            ).to(device)
-
         else:
             model = KOLGRUCaseResidualRegressor(
                 n_features=int(F_eff),
@@ -660,16 +501,12 @@ def run_one_fold(
                 hidden_size=int(getattr(config.model, "hidden_size", 128)),
                 num_layers=int(getattr(config.model, "num_layers", 2)),
                 dropout=float(getattr(config.model, "dropout", 0.1)),
-                bidirectional=bool(
-                    getattr(config.model, "bidirectional", False)
-                ),
+                bidirectional=bool(getattr(config.model, "bidirectional", False)),
                 n_cases=len(CASE_TO_IDX),
             ).to(device)
 
         optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=float(best_lr),
-            weight_decay=float(best_wd),
+            model.parameters(), lr=float(best_lr), weight_decay=float(best_wd)
         )
 
         if eval_only:
@@ -677,7 +514,6 @@ def run_one_fold(
                 raise FileNotFoundError(
                     f"eval_only=true but checkpoint not found: {ckpt_path}"
                 )
-
             ckpt = torch.load(ckpt_path, map_location=device)
             model.load_state_dict(ckpt["model_state_dict"])
             validate_checkpoint_metadata(
@@ -689,36 +525,30 @@ def run_one_fold(
                 logger=logger,
             )
             logger.info("Loaded checkpoint: %s", ckpt_path)
-
+        elif kol_model_mode == "bounded_residual_fusion":
+            train_learned_fusion(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                optimizer=optimizer,
+                device=device,
+                logger=logger,
+                model_mode=kol_model_mode,
+                epochs=int(config.training.epochs),
+                patience=int(getattr(config.training, "patience", 15)),
+            )
         else:
-            if kol_model_mode in {"gru_only", "learned_fusion", "bounded_residual_fusion"}:
-                train_learned_fusion(
-                    model=model,
-                    train_loader=train_loader,
-                    val_loader=val_loader,
-                    optimizer=optimizer,
-                    device=device,
-                    logger=logger,
-                    model_mode=kol_model_mode,
-                    epochs=int(config.training.epochs),
-                    patience=int(getattr(config.training, "patience", 15)),
-                )
-
-            elif kol_prediction_mode == "prior_only":
-                logger.info("KOL mode is prior_only: skipping training.")
-
-            else:
-                train_kol_case_k0(
-                    model=model,
-                    train_loader=train_loader,
-                    val_loader=val_loader,
-                    optimizer=optimizer,
-                    device=device,
-                    prediction_mode=kol_prediction_mode,
-                    epochs=int(config.training.epochs),
-                    patience=int(getattr(config.training, "patience", 15)),
-                    logger=logger,
-                )
+            train_kol_case_k0(
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                optimizer=optimizer,
+                device=device,
+                prediction_mode=kol_prediction_mode,
+                epochs=int(config.training.epochs),
+                patience=int(getattr(config.training, "patience", 15)),
+                logger=logger,
+            )
 
         if kol_model_mode == "bounded_residual_fusion":
             (
@@ -736,34 +566,6 @@ def run_one_fold(
                 logger=logger,
                 model_mode=kol_model_mode,
             )
-
-            y_score_np = residual_np
-
-        elif kol_model_mode in {
-            "gru_only",
-            "learned_fusion",
-        }:
-            (
-                test_metrics,
-                y_true_np,
-                y_pred_np,
-                dprior_np,
-                d_gru_np,
-                alpha_np,
-                case_np,
-            ) = evaluate_learned_fusion(
-                model=model,
-                test_loader=test_loader,
-                device=device,
-                logger=logger,
-                model_mode=kol_model_mode,
-            )
-
-            if kol_model_mode == "learned_fusion":
-                y_score_np = alpha_np
-            else:
-                y_score_np = d_gru_np
-
         else:
             (
                 test_metrics,
@@ -780,7 +582,7 @@ def run_one_fold(
                 logger=logger,
             )
 
-            y_score_np = residual_np
+        y_score_np = residual_np
 
     # Phase 3: align predictions with compact test indices before persistence.
     # A capped test loader emits a prefix of the sampler's ordered indices.
@@ -814,7 +616,6 @@ def run_one_fold(
             d_phys_prior=d_phys_prior,
             dprior_np=dprior_np,
             residual_np=residual_np,
-            d_gru_np=d_gru_np,
             alpha_np=alpha_np,
             case_np=case_np,
             logger=logger,
