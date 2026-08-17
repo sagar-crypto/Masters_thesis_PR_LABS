@@ -116,21 +116,14 @@ def load_operator_inputs_if_enabled(
     # neural model is divided by 100 here.
     d_phys_prior = d_phys_prior_pct / 100.0
 
-    # The final GRU-only and learned-fusion methods must not use historical
-    # one-ended / Takagi / modified-Takagi feature columns.
-    #
-    # They receive:
-    #   - waveform sequence through the normal dataset path
-    #   - d_phys_prior through the dedicated prior input
-    #
-    # For gru_only, d_phys_prior is loaded only to keep the exact same
-    # selected-window subset as the fusion run. The GRU-only model will not
-    # use it in its forward pass.
+    # The canonical G adapter reports gru_only while delegating to the private
+    # GRU runner. Keep loading the prior at that adapter/runner boundary without
+    # exposing historical operator feature columns to the private model.
     kol_model_mode = str(
         getattr(config.training, "kol_model_mode", "legacy_residual")
     ).lower().strip()
 
-    if kol_model_mode in {"gru_only", "learned_fusion"}:
+    if kol_model_mode == "gru_only":
         return d_phys_prior, None, []
 
     configured_cols = getattr(config.training, "operator_feature_cols", None)
