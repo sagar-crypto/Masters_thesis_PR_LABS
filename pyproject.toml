@@ -13,6 +13,7 @@ dependencies = [
   "hydra-core==1.3.2", "omegaconf==2.3.0", "numpy==2.4.2",
   "pandas==3.0.0", "torch==2.10.0", "scikit-learn==1.8.0",
   "wandb>=0.19", "networkx>=3.4", "pyarrow>=19", "matplotlib>=3.10",
+  "pydantic>=2,<3",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,7 @@ kol-validate = "KOL.cli.validate:main"
 kol-train = "KOL.cli.train:main"
 kol-evaluate = "KOL.cli.evaluate:main"
 kol-physics = "KOL.cli.physics:main"
+kol-prepare-inputs = "KOL.cli.prepare_inputs:main"
 
 [tool.setuptools.packages.find]
 include = ["KOL*"]

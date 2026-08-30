@@ -53,6 +53,26 @@ Canonical configuration should be overridden through environment variables, not 
 
 Example path compositions are provided in `conf/paths/local.example.yaml` and `conf/paths/hpc.example.yaml`. Missing private modules are a hard error; the project does not substitute a public or approximate implementation.
 
+### Rebuilding the active C/L inputs
+
+The four unique CSVs used by the C/L experiments can be rebuilt without waveform data or the private physics package. Supply three synchronized 90 kV all-fault-start exports (with `operator_side_mode` and filenames identifying `default`, `opposite`, and `both`) and one 110 kV all-fault-start `both` export:
+
+```bash
+kol-prepare-inputs \
+  --raw-90-default PATH \
+  --raw-90-opposite PATH \
+  --raw-90-both PATH \
+  --raw-110-both PATH \
+  --output-root outputs/chapter4/model_inputs/unified_active \
+  --activate
+```
+
+Every build validates file roles, synchronized unique keys, finite targets/features, and the canonical cohort/window structure before publishing a timestamped directory. It contains four target-free training CSVs, `ACTIVE_INPUTS.env`, a hash-and-statistics manifest, selected-operator mappings, compressed row diagnostics, and a selection disclosure. Without `--activate`, the timestamped build is published but the runtime selection is unchanged. With `--activate`, `LATEST_ACTIVE_INPUTS.env` is replaced atomically only after the complete build passes validation.
+
+The one-ended policy selects the lowest prepared-prior MAE over the full cohort, by fault case at 90 kV and by fault-line/fault-case at 110 kV. This intentionally uses targets and is not fold-safe or deployment-ready. The two-ended inputs only bound the raw positive-sequence estimate; all non-finite priors become 50% and finite priors are clipped to `[0, 100]`.
+
+`hpc/setup_hpc_env.sh` uses `KOL_ACTIVE_INPUTS_ENV` when set, otherwise the canonical unified latest file, and otherwise the three historical environment files. It validates all four CSVs before updating the C/L runtime symlinks.
+
 ## Validation and execution workflows
 
 These stages have deliberately different requirements and costs.

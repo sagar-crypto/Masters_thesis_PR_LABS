@@ -6,11 +6,30 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-
 RAW_PRIOR_COL = "d_two_ended_posseq_plus_pct"
 RAW_REASON_COL = "two_ended_posseq_plus_reason"
 INPUT_PRIOR_COL = "d_two_ended_posseq_plus_input_pct"
 FALLBACK_FLAG_COL = "two_ended_posseq_input_used_fallback"
+
+
+def bound_prior_values(
+    raw_values: np.ndarray | pd.Series,
+    *,
+    fallback_pct: float = 50.0,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+    """Return a finite percentage prior, fallback mask, and transform counts."""
+    if not 0.0 <= fallback_pct <= 100.0:
+        raise ValueError("fallback_pct must be in the range [0, 100].")
+    raw = pd.to_numeric(pd.Series(raw_values), errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(raw)
+    bounded = np.full(raw.shape, float(fallback_pct), dtype=np.float64)
+    bounded[finite] = np.clip(raw[finite], 0.0, 100.0)
+    counts = {
+        "fallback": int((~finite).sum()),
+        "clipped_low": int((finite & (raw < 0.0)).sum()),
+        "clipped_high": int((finite & (raw > 100.0)).sum()),
+    }
+    return bounded, ~finite, counts
 
 
 def prepare_two_ended_prior_file(
@@ -45,13 +64,9 @@ def prepare_two_ended_prior_file(
 
     missing_cols = sorted(required_cols.difference(df.columns))
     if missing_cols:
-        raise ValueError(
-            f"Missing required columns in '{input_path}': {missing_cols}"
-        )
+        raise ValueError(f"Missing required columns in '{input_path}': {missing_cols}")
 
-    duplicate_count = int(
-        df.duplicated(["sample_id", "window_idx"]).sum()
-    )
+    duplicate_count = int(df.duplicated(["sample_id", "window_idx"]).sum())
 
     if duplicate_count > 0:
         raise ValueError(
@@ -59,24 +74,11 @@ def prepare_two_ended_prior_file(
             f"(sample_id, window_idx) keys: {duplicate_count}"
         )
 
-    raw_prior = pd.to_numeric(
-        df[raw_prior_col],
-        errors="coerce",
-    ).to_numpy(dtype=float)
-
-    finite_mask = np.isfinite(raw_prior)
-
-    bounded_prior = np.full(
-        raw_prior.shape,
-        fill_value=float(fallback_pct),
-        dtype=np.float64,
+    raw_prior = pd.to_numeric(df[raw_prior_col], errors="coerce").to_numpy(dtype=float)
+    bounded_prior, fallback_mask, counts = bound_prior_values(
+        raw_prior, fallback_pct=fallback_pct
     )
-
-    bounded_prior[finite_mask] = np.clip(
-        raw_prior[finite_mask],
-        0.0,
-        100.0,
-    )
+    finite_mask = ~fallback_mask
 
     df[input_prior_col] = bounded_prior.astype(np.float32)
     df[FALLBACK_FLAG_COL] = (~finite_mask).astype(np.int8)
@@ -84,15 +86,9 @@ def prepare_two_ended_prior_file(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)
 
-    clipped_low_count = int(
-        np.sum(finite_mask & (raw_prior < 0.0))
-    )
-
-    clipped_high_count = int(
-        np.sum(finite_mask & (raw_prior > 100.0))
-    )
-
-    fallback_count = int(np.sum(~finite_mask))
+    clipped_low_count = counts["clipped_low"]
+    clipped_high_count = counts["clipped_high"]
+    fallback_count = counts["fallback"]
 
     print(f"Saved model-input prior file: {output_path}")
     print(f"Total rows: {len(df)}")
@@ -104,12 +100,7 @@ def prepare_two_ended_prior_file(
 
     if raw_reason_col in df.columns:
         print("\nRaw operator reason counts:")
-        print(
-            df[raw_reason_col]
-            .fillna("missing_reason")
-            .value_counts()
-            .to_string()
-        )
+        print(df[raw_reason_col].fillna("missing_reason").value_counts().to_string())
 
     return df
 
