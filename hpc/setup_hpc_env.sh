@@ -27,26 +27,34 @@ require_dir "Vault root" "$VAULT_ROOT"
 require_dir "Waveform source" "$SOURCE_WINDOWS_DIR"
 require_dir "Third-party dependency" "$THIRD_PARTY_DIR/src"
 
-export SINGLE_ENDED_ENV="$THESIS_DIR/outputs/chapter4/model_inputs/caseaware_bestmae/LATEST_CASEAWARE_SINGLE_ENDED_INPUTS.env"
-export TWO_ENDED_ENV="$THESIS_DIR/outputs/chapter4/model_inputs/two_ended_posseq/LATEST_TWO_ENDED_INPUTS.env"
-export INPUT_90_AFS_ENV="$THESIS_DIR/outputs/chapter4/temp_90kv_afs_check/LATEST_INPUTS.env"
-require_file "Single-ended prepared-input environment" "$SINGLE_ENDED_ENV"
-require_file "Two-ended prepared-input environment" "$TWO_ENDED_ENV"
-require_file "90 kV all-fault-start prepared-input environment" "$INPUT_90_AFS_ENV"
+CANONICAL_ACTIVE_INPUTS_ENV="$THESIS_DIR/outputs/chapter4/model_inputs/unified_active/LATEST_ACTIVE_INPUTS.env"
+ACTIVE_INPUTS_ENV="${KOL_ACTIVE_INPUTS_ENV:-$CANONICAL_ACTIVE_INPUTS_ENV}"
 
 set -a
-# shellcheck disable=SC1090
-source "$SINGLE_ENDED_ENV"
-# shellcheck disable=SC1090
-source "$TWO_ENDED_ENV"
-# shellcheck disable=SC1090
-source "$INPUT_90_AFS_ENV"
+if [[ -n "${KOL_ACTIVE_INPUTS_ENV:-}" || -s "$CANONICAL_ACTIVE_INPUTS_ENV" ]]; then
+    require_file "Unified active-input environment" "$ACTIVE_INPUTS_ENV"
+    # shellcheck disable=SC1090
+    source "$ACTIVE_INPUTS_ENV"
+else
+    export SINGLE_ENDED_ENV="$THESIS_DIR/outputs/chapter4/model_inputs/caseaware_bestmae/LATEST_CASEAWARE_SINGLE_ENDED_INPUTS.env"
+    export TWO_ENDED_ENV="$THESIS_DIR/outputs/chapter4/model_inputs/two_ended_posseq/LATEST_TWO_ENDED_INPUTS.env"
+    export INPUT_90_AFS_ENV="$THESIS_DIR/outputs/chapter4/temp_90kv_afs_check/LATEST_INPUTS.env"
+    require_file "Single-ended prepared-input environment" "$SINGLE_ENDED_ENV"
+    require_file "Two-ended prepared-input environment" "$TWO_ENDED_ENV"
+    require_file "90 kV all-fault-start prepared-input environment" "$INPUT_90_AFS_ENV"
+    # shellcheck disable=SC1090
+    source "$SINGLE_ENDED_ENV"
+    # shellcheck disable=SC1090
+    source "$TWO_ENDED_ENV"
+    # shellcheck disable=SC1090
+    source "$INPUT_90_AFS_ENV"
+fi
 set +a
 
-: "${P90_1E_AFS_PRIOR:?P90_1E_AFS_PRIOR is missing from $INPUT_90_AFS_ENV}"
-: "${P90_2E_AFS_PRIOR:?P90_2E_AFS_PRIOR is missing from $INPUT_90_AFS_ENV}"
-: "${P110_1E_LINE_CASE_PRIOR:?P110_1E_LINE_CASE_PRIOR is missing from $SINGLE_ENDED_ENV}"
-: "${P110_2E_PRIOR:?P110_2E_PRIOR is missing from $TWO_ENDED_ENV}"
+: "${P90_1E_AFS_PRIOR:?P90_1E_AFS_PRIOR is missing from prepared-input environment}"
+: "${P90_2E_AFS_PRIOR:?P90_2E_AFS_PRIOR is missing from prepared-input environment}"
+: "${P110_1E_LINE_CASE_PRIOR:?P110_1E_LINE_CASE_PRIOR is missing from prepared-input environment}"
+: "${P110_2E_PRIOR:?P110_2E_PRIOR is missing from prepared-input environment}"
 require_file "P90-1E selected CSV" "$P90_1E_AFS_PRIOR"
 require_file "P90-2E selected CSV" "$P90_2E_AFS_PRIOR"
 require_file "P110-1E selected CSV" "$P110_1E_LINE_CASE_PRIOR"
